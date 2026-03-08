@@ -7,16 +7,16 @@
 可直接使用 GitHub 仓库中的脚本：
 
 ```bash
-curl -fsSL -o vless-server.sh https://raw.githubusercontent.com/coldboy404/vless-all-in-one/main/vless-server.sh && chmod +x vless-server.sh && ./vless-server.sh
+curl -O https://raw.githubusercontent.com/coldboy404/vless-all-in-one/main/vless-server.sh && bash vless-server.sh
 ```
 
 如果你的系统没有 `curl`，也可以使用：
 
 ```bash
-wget -O vless-server.sh https://raw.githubusercontent.com/coldboy404/vless-all-in-one/main/vless-server.sh && chmod +x vless-server.sh && ./vless-server.sh
+wget -O vless-server.sh https://raw.githubusercontent.com/coldboy404/vless-all-in-one/main/vless-server.sh && bash vless-server.sh
 ```
 
-> 使用前请先自行审查脚本内容，并确认端口、防火墙、证书与现有服务不会冲突。
+> 如需先审查脚本再执行，可先查看文件内容或参考 `docs/usage-notes.md`。
 
 ## 当前内容
 
