@@ -17,7 +17,7 @@
 #  项目地址: https://github.com/coldboy404/vless-all-in-one
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.4.10"
+readonly VERSION="2026.04.23"
 readonly AUTHOR="coldboy404"
 readonly REPO_URL="https://github.com/coldboy404/vless-all-in-one"
 readonly SCRIPT_REPO="coldboy404/vless-all-in-one"
@@ -17031,6 +17031,41 @@ show_single_protocol_info() {
     [[ "$clear_screen" == "true" ]] && _pause
 }
 
+edit_protocol_menu() {
+    local installed=$(get_installed_protocols)
+    [[ -z "$installed" ]] && { _warn "未安装任何协议"; return; }
+
+    _header
+    echo -e "  ${W}编辑协议${NC}"
+    _line
+    echo -e "  ${D}选择一个已安装协议，进入修改/覆盖流程${NC}"
+    echo ""
+
+    local i=1
+    local proto_array=()
+    for protocol in $installed; do
+        _item "$i" "$(get_protocol_name "$protocol")"
+        proto_array+=("$protocol")
+        ((i++))
+    done
+    _item "0" "返回"
+    _line
+
+    local max=$((i-1))
+    while true; do
+        read -rp "  选择要编辑的协议 [0-$max]: " choice
+        [[ "$choice" == "0" ]] && return 0
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 ]] && [[ "$choice" -le "$max" ]]; then
+            SELECTED_PROTOCOL="${proto_array[$((choice-1))]}"
+            INSTALL_MODE=""
+            REPLACE_PORT=""
+            do_install_server
+            return 0
+        fi
+        _err "无效选择"
+    done
+}
+
 # 管理协议服务
 manage_protocol_services() {
     local installed=$(get_installed_protocols)
@@ -17838,9 +17873,12 @@ do_install_server() {
     echo -e "  ${W}服务端安装向导${NC}"
     echo -e "  系统: ${C}$DISTRO${NC}"
     
-    # 选择协议
-    select_protocol || return 1
-    local protocol="$SELECTED_PROTOCOL"
+    local protocol="${SELECTED_PROTOCOL:-}"
+    if [[ -z "$protocol" ]]; then
+        # 选择协议
+        select_protocol || return 1
+        protocol="$SELECTED_PROTOCOL"
+    fi
     
     # 检查协议是否为空（用户选择返回）
     [[ -z "$protocol" ]] && return 1
@@ -24796,35 +24834,36 @@ main_menu() {
         local installed="$_INSTALLED_CACHE"
         if [[ -n "$installed" ]]; then
             echo -e "  ${C}协议与核心${NC}"
-            _item "1" "安装新协议"
-            _item "2" "核心版本管理"
-            _item "3" "卸载指定协议"
+            _item "1" "安装协议"
+            _item "2" "编辑协议"
+            _item "3" "核心管理"
+            _item "4" "卸载协议"
             echo -e "  ${D}───────────────────────────────────────────${NC}"
             echo -e "  ${C}用户与订阅${NC}"
-            _item "4" "用户管理"
-            _item "5" "查看协议配置"
-            _item "6" "订阅服务管理"
-            _item "7" "管理协议服务"
+            _item "5" "用户管理"
+            _item "6" "查看配置"
+            _item "7" "订阅管理"
+            _item "8" "管理服务"
             echo -e "  ${D}───────────────────────────────────────────${NC}"
             echo -e "  ${C}网络与工具${NC}"
-            _item "8" "分流管理"
-            _item "9" "CF Tunnel"
-            _item "10" "BBR 网络优化"
-            _item "11" "查看运行日志"
+            _item "9" "分流管理"
+            _item "10" "CF Tunnel"
+            _item "11" "BBR 优化"
+            _item "12" "运行日志"
             echo -e "  ${D}───────────────────────────────────────────${NC}"
             echo -e "  ${C}脚本${NC}"
-            local script_update_item="检查脚本更新"
-            [[ -n "$script_update_ver" ]] && script_update_item="检查脚本更新 ${Y}[有更新 v${script_update_ver}]${NC}"
-            _item "12" "$script_update_item"
-            _item "13" "卸载"
+            local script_update_item="脚本更新"
+            [[ -n "$script_update_ver" ]] && script_update_item="脚本更新 ${Y}[v${script_update_ver}]${NC}"
+            _item "13" "$script_update_item"
+            _item "14" "卸载"
         else
             echo -e "  ${C}初始化${NC}"
             _item "1" "安装协议"
             echo -e "  ${D}───────────────────────────────────────────${NC}"
             echo -e "  ${C}脚本${NC}"
-            local script_update_item="检查脚本更新"
-            [[ -n "$script_update_ver" ]] && script_update_item="检查脚本更新 ${Y}[有更新 v${script_update_ver}]${NC}"
-            _item "12" "$script_update_item"
+            local script_update_item="脚本更新"
+            [[ -n "$script_update_ver" ]] && script_update_item="脚本更新 ${Y}[v${script_update_ver}]${NC}"
+            _item "13" "$script_update_item"
         fi
         _item "0" "退出"
         _line
@@ -24835,25 +24874,26 @@ main_menu() {
         if [[ -n "$installed" ]]; then
             case $choice in
                 1) do_install_server; skip_pause=true ;;
-                2) update_core_menu; skip_pause=true ;;
-                3) uninstall_specific_protocol; skip_pause=true ;;
-                4) manage_users; skip_pause=true ;;
-                5) show_all_protocols_info; skip_pause=true ;;
-                6) manage_subscription; skip_pause=true ;;
-                7) manage_protocol_services; skip_pause=true ;;
-                8) manage_routing; skip_pause=true ;;
-                9) manage_cloudflare_tunnel; skip_pause=true ;;
-                10) enable_bbr; skip_pause=true ;;
-                11) show_logs; skip_pause=true ;;
-                12) do_update ;;
-                13) uninstall_menu ;;
+                2) edit_protocol_menu; skip_pause=true ;;
+                3) update_core_menu; skip_pause=true ;;
+                4) uninstall_specific_protocol; skip_pause=true ;;
+                5) manage_users; skip_pause=true ;;
+                6) show_all_protocols_info; skip_pause=true ;;
+                7) manage_subscription; skip_pause=true ;;
+                8) manage_protocol_services; skip_pause=true ;;
+                9) manage_routing; skip_pause=true ;;
+                10) manage_cloudflare_tunnel; skip_pause=true ;;
+                11) enable_bbr; skip_pause=true ;;
+                12) show_logs; skip_pause=true ;;
+                13) do_update ;;
+                14) uninstall_menu ;;
                 0) exit 0 ;;
                 *) _err "无效选择"; skip_pause=true ;;
             esac
         else
             case $choice in
                 1) do_install_server; skip_pause=true ;;
-                12) do_update ;;
+                13) do_update ;;
                 0) exit 0 ;;
                 *) _err "无效选择"; skip_pause=true ;;
             esac
