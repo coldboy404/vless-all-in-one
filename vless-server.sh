@@ -13,15 +13,15 @@
 #  适配: Alpine/Debian/Ubuntu/CentOS
 #  
 #  
-#  作者: Chil30
-#  项目地址: https://gitlab.com/chil30-group/vless-all-in-one
+#  作者: coldboy404
+#  项目地址: https://github.com/coldboy404/vless-all-in-one
 #═══════════════════════════════════════════════════════════════════════════════
 
 readonly VERSION="3.4.10"
-readonly AUTHOR="Chil30"
-readonly REPO_URL="https://gitlab.com/chil30-group/vless-all-in-one"
-readonly SCRIPT_REPO="chil30-group/vless-all-in-one"
-readonly SCRIPT_RAW_URL="https://gitlab.com/chil30-group/vless-all-in-one/-/raw/main/vless-server.sh"
+readonly AUTHOR="coldboy404"
+readonly REPO_URL="https://github.com/coldboy404/vless-all-in-one"
+readonly SCRIPT_REPO="coldboy404/vless-all-in-one"
+readonly SCRIPT_RAW_URL="https://raw.githubusercontent.com/coldboy404/vless-all-in-one/main/vless-server.sh"
 readonly CFG="/etc/vless-reality"
 readonly ACME_DEFAULT_EMAIL="acme@vaio.com"
 
@@ -6665,12 +6665,10 @@ _download_script_to() {
 # 获取最新标签版本号（无缓存）
 _get_latest_tag_version() {
     local repo="$1"
-    local project result version
-
-    project=$(echo "$repo" | sed 's/\//%2F/g')
+    local result version
 
     result=$(curl -sL --connect-timeout 5 --max-time 10 \
-    "https://gitlab.com/api/v4/projects/${project}/repository/tags?per_page=1" 2>/dev/null)
+    "https://api.github.com/repos/${repo}/tags?per_page=1" 2>/dev/null)
 
     [[ -z "$result" ]] && return 1
 
@@ -17666,63 +17664,45 @@ do_uninstall() {
     fi
     
     _info "删除配置目录..."
-    
-    # 保留证书目录和域名记录，避免重复申请
-    local cert_backup_dir="/tmp/vless-certs-backup"
-    if [[ -d "$CFG/certs" ]]; then
-        _info "备份证书文件..."
-        mkdir -p "$cert_backup_dir"
-        cp -r "$CFG/certs" "$cert_backup_dir/" 2>/dev/null
-        [[ -f "$CFG/cert_domain" ]] && cp "$CFG/cert_domain" "$cert_backup_dir/" 2>/dev/null
-    fi
-    
-    # 删除配置目录（但保留证书）
-    find "$CFG" -name "*.json" -delete 2>/dev/null
-    find "$CFG" -name "*.join" -delete 2>/dev/null
-    find "$CFG" -name "*.yaml" -delete 2>/dev/null
-    find "$CFG" -name "*.conf" -delete 2>/dev/null
-    rm -f "$CFG/installed_protocols" 2>/dev/null
-    
-    # 如果没有证书，删除整个目录
-    if [[ ! -d "$CFG/certs" ]]; then
-        rm -rf "$CFG"
-    else
-        _ok "证书已保留，配置文件已清理，下次安装将自动复用证书"
+    uninstall_expire_check_cron 2>/dev/null || true
+    remove_traffic_cron 2>/dev/null || true
+    rm -rf "$CFG" 2>/dev/null
+    rm -rf "$VERSION_CACHE_DIR" 2>/dev/null
+    rm -rf /tmp/vless-certs-backup 2>/dev/null
+    rm -rf /var/www/html 2>/dev/null
+    rm -f /root/.acme.sh/*/ecc/*.cer /root/.acme.sh/*/ecc/*.key /root/.acme.sh/*/ecc/fullchain.cer 2>/dev/null || true
+    rm -f /usr/local/bin/{xray,sing-box,snell-server,snell-server-v5,anytls,anytls-go,shadow-tls,caddy,naive,naiveproxy} 2>/dev/null
+    rm -f /usr/bin/{xray,sing-box,snell-server,snell-server-v5,anytls,anytls-go,shadow-tls,caddy,naive,naiveproxy} 2>/dev/null
+
+    _info "卸载 Xray / Sing-box 软件包..."
+    if [[ "$DISTRO" == "ubuntu" || "$DISTRO" == "debian" ]]; then
+        apt-get remove -y xray sing-box 2>/dev/null || true
+        apt-get autoremove -y 2>/dev/null || true
+    elif [[ "$DISTRO" == "centos" ]]; then
+        yum remove -y xray sing-box 2>/dev/null || true
+    elif [[ "$DISTRO" == "alpine" ]]; then
+        apk del xray sing-box 2>/dev/null || true
     fi
     
     _info "删除快捷命令..."
     rm -f /usr/local/bin/vless /usr/local/bin/vless.sh /usr/local/bin/vless-server.sh /usr/bin/vless 2>/dev/null
     
     # 清理 Caddy（如果存在）
-    # 支持 NaïveProxy 自定义编译版本和标准版本
-    if [[ -f "/usr/local/bin/caddy" ]]; then
+    if [[ -f "/usr/local/bin/caddy" ]] || pgrep -x caddy >/dev/null 2>&1; then
         _info "清理 Caddy 二进制文件..."
-        # 先停止可能存在的 Caddy 进程
-        pkill -9 caddy 2>/dev/null
-        # 删除二进制文件
-        rm -f /usr/local/bin/caddy 2>/dev/null
+        pkill -9 caddy 2>/dev/null || true
+        rm -f /usr/local/bin/caddy /usr/bin/caddy 2>/dev/null
         _ok "Caddy 已删除"
     fi
     
     _ok "卸载完成"
     echo ""
-    echo -e "  ${Y}已保留的内容:${NC}"
-    echo -e "  • 软件包: xray, sing-box, snell-server"
-    echo -e "  • 软件包: anytls-server, shadow-tls, caddy"
-    echo -e "  • ${G}域名证书: 下次安装将自动复用，无需重新申请${NC}"
-    echo ""
-    echo -e "  ${C}如需完全删除软件包，请执行:${NC}"
-    echo -e "  ${G}rm -f /usr/local/bin/{xray,sing-box,snell-server*,anytls-*,shadow-tls,caddy}${NC}"
-    echo ""
-    echo -e "  ${C}如需删除证书，请执行:${NC}"
-    echo -e "  ${G}rm -rf $CFG/certs $CFG/cert_domain${NC}"
-    echo ""
-    echo -e "  ${R}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  ${R}如需完全卸载并删除所有配置文件:${NC}"
-    echo -e "  ${Y}所有配置文件位于: ${G}$CFG${NC}"
-    echo -e "  ${Y}执行以下命令完全删除:${NC}"
-    echo -e "  ${G}rm -rf $CFG${NC}"
-    echo -e "  ${R}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "  ${G}已执行完整清理:${NC}"
+    echo -e "  • 配置目录"
+    echo -e "  • 证书与缓存"
+    echo -e "  • 定时任务"
+    echo -e "  • 快捷命令"
+    echo -e "  • 相关二进制文件"
 }
 
 #═══════════════════════════════════════════════════════════════════════════════
@@ -24627,7 +24607,7 @@ do_update() {
     
     _init_version_cache
     local tmp_file="" remote_ver=""
-    remote_ver=$(_get_latest_script_version "true" "false")
+    remote_ver=$(_get_latest_script_version "false" "true")
     if [[ -z "$remote_ver" ]]; then
         _err "无法获取远程版本信息"
         return 1
@@ -24768,28 +24748,33 @@ main_menu() {
         # 复用 show_status 缓存的结果，避免重复查询数据库
         local installed="$_INSTALLED_CACHE"
         if [[ -n "$installed" ]]; then
-            # 多协议服务端菜单
-            _item "1" "安装新协议 (多协议共存)"
+            echo -e "  ${C}协议与核心${NC}"
+            _item "1" "安装新协议"
             _item "2" "核心版本管理 (Xray/Sing-box)"
             _item "3" "卸载指定协议"
-            _item "4" "用户管理 (多用户/流量/通知)"
             echo -e "  ${D}───────────────────────────────────────────${NC}"
+            echo -e "  ${C}用户与订阅${NC}"
+            _item "4" "用户管理"
             _item "5" "查看协议配置"
             _item "6" "订阅服务管理"
             _item "7" "管理协议服务"
-            _item "8" "分流管理"
-            _item "9" "CF Tunnel(Argo)"
             echo -e "  ${D}───────────────────────────────────────────${NC}"
+            echo -e "  ${C}网络与工具${NC}"
+            _item "8" "分流管理"
+            _item "9" "CF Tunnel (Argo)"
             _item "10" "BBR 网络优化"
             _item "11" "查看运行日志"
             echo -e "  ${D}───────────────────────────────────────────${NC}"
+            echo -e "  ${C}脚本${NC}"
             local script_update_item="检查脚本更新"
             [[ -n "$script_update_ver" ]] && script_update_item="检查脚本更新 ${Y}[有更新 v${script_update_ver}]${NC}"
             _item "12" "$script_update_item"
-            _item "13" "完全卸载"
+            _item "13" "完全卸载 (含 Xray/Sing-box)"
         else
+            echo -e "  ${C}初始化${NC}"
             _item "1" "安装协议"
             echo -e "  ${D}───────────────────────────────────────────${NC}"
+            echo -e "  ${C}脚本${NC}"
             local script_update_item="检查脚本更新"
             [[ -n "$script_update_ver" ]] && script_update_item="检查脚本更新 ${Y}[有更新 v${script_update_ver}]${NC}"
             _item "12" "$script_update_item"
