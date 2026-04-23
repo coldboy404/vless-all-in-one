@@ -3966,9 +3966,9 @@ _get_query_param() {
 _header() {
     clear; echo "" >&2
     _dline
-    echo -e "      ${W}多协议代理${NC} ${D}一键部署${NC} ${C}v${VERSION}${NC} ${Y}[服务端]${NC}" >&2
-    echo -e "      ${D}作者: ${AUTHOR}  快捷命令: vless${NC}" >&2
-    echo -e "      ${D}${REPO_URL}${NC}" >&2
+    echo -e "  ${W}多协议代理${NC} ${D}一键部署${NC} ${C}v${VERSION}${NC} ${Y}[服务端]${NC}" >&2
+    echo -e "  ${D}作者: ${AUTHOR}  快捷命令: vless${NC}" >&2
+    echo -e "  ${D}${REPO_URL}${NC}" >&2
     _dline
 }
 
