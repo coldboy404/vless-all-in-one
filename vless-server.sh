@@ -17543,13 +17543,10 @@ do_uninstall() {
     read -rp "  确认卸载? [y/N]: " confirm
     [[ ! "$confirm" =~ ^[yY]$ ]] && return
 
-    local installed_protocols=""
-    installed_protocols=$(get_installed_protocols 2>/dev/null || true)
-    local has_naive=false
-    if grep -qx "naive" <<<"$installed_protocols" || [[ -f "$CFG/naive.join" ]] || [[ -f "$CFG/Caddyfile" ]]; then
-        has_naive=true
-    fi
-    
+    uninstall_config="${uninstall_config:-true}"
+    uninstall_binaries="${uninstall_binaries:-true}"
+    uninstall_packages="${uninstall_packages:-true}"
+
     _info "停止所有服务..."
     stop_services
     
@@ -17671,29 +17668,36 @@ do_uninstall() {
         systemctl daemon-reload
     fi
     
-    _info "删除配置目录..."
-    uninstall_expire_check_cron 2>/dev/null || true
-    remove_traffic_cron 2>/dev/null || true
-    rm -rf "$CFG" 2>/dev/null
-    rm -rf "$VERSION_CACHE_DIR" 2>/dev/null
-    rm -rf /tmp/vless-certs-backup 2>/dev/null
-    rm -rf /var/www/html 2>/dev/null
-    rm -f /root/.acme.sh/*/ecc/*.cer /root/.acme.sh/*/ecc/*.key /root/.acme.sh/*/ecc/fullchain.cer 2>/dev/null || true
-    rm -f /usr/local/bin/{xray,sing-box,snell-server,snell-server-v5,anytls,anytls-go,shadow-tls,caddy,naive,naiveproxy} 2>/dev/null
-    rm -f /usr/bin/{xray,sing-box,snell-server,snell-server-v5,anytls,anytls-go,shadow-tls,caddy,naive,naiveproxy} 2>/dev/null
-
-    _info "卸载 Xray / Sing-box 软件包..."
-    if [[ "$DISTRO" == "ubuntu" || "$DISTRO" == "debian" ]]; then
-        apt-get remove -y xray sing-box 2>/dev/null || true
-        apt-get autoremove -y 2>/dev/null || true
-    elif [[ "$DISTRO" == "centos" ]]; then
-        yum remove -y xray sing-box 2>/dev/null || true
-    elif [[ "$DISTRO" == "alpine" ]]; then
-        apk del xray sing-box 2>/dev/null || true
+    if [[ "$uninstall_config" == "true" ]]; then
+        _info "删除配置目录..."
+        uninstall_expire_check_cron 2>/dev/null || true
+        remove_traffic_cron 2>/dev/null || true
+        rm -rf "$CFG" 2>/dev/null
+        rm -rf "$VERSION_CACHE_DIR" 2>/dev/null
+        rm -rf /tmp/vless-certs-backup 2>/dev/null
+        rm -rf /var/www/html 2>/dev/null
+        rm -f /root/.acme.sh/*/ecc/*.cer /root/.acme.sh/*/ecc/*.key /root/.acme.sh/*/ecc/fullchain.cer 2>/dev/null || true
     fi
-    
-    _info "删除快捷命令..."
-    rm -f /usr/local/bin/vless /usr/local/bin/vless.sh /usr/local/bin/vless-server.sh /usr/bin/vless 2>/dev/null
+
+    if [[ "$uninstall_binaries" == "true" ]]; then
+        _info "删除相关二进制..."
+        rm -f /usr/local/bin/{xray,sing-box,snell-server,snell-server-v5,anytls,anytls-go,shadow-tls,caddy,naive,naiveproxy} 2>/dev/null
+        rm -f /usr/bin/{xray,sing-box,snell-server,snell-server-v5,anytls,anytls-go,shadow-tls,caddy,naive,naiveproxy} 2>/dev/null
+        _info "删除快捷命令..."
+        rm -f /usr/local/bin/vless /usr/local/bin/vless.sh /usr/local/bin/vless-server.sh /usr/bin/vless 2>/dev/null
+    fi
+
+    if [[ "$uninstall_packages" == "true" ]]; then
+        _info "卸载 Xray / Sing-box 软件包..."
+        if [[ "$DISTRO" == "ubuntu" || "$DISTRO" == "debian" ]]; then
+            apt-get remove -y xray sing-box 2>/dev/null || true
+            apt-get autoremove -y 2>/dev/null || true
+        elif [[ "$DISTRO" == "centos" ]]; then
+            yum remove -y xray sing-box 2>/dev/null || true
+        elif [[ "$DISTRO" == "alpine" ]]; then
+            apk del xray sing-box 2>/dev/null || true
+        fi
+    fi
     
     # 清理 Caddy（如果存在）
     if [[ -f "/usr/local/bin/caddy" ]] || pgrep -x caddy >/dev/null 2>&1; then
@@ -17705,12 +17709,47 @@ do_uninstall() {
     
     _ok "卸载完成"
     echo ""
-    echo -e "  ${G}已执行完整清理:${NC}"
-    echo -e "  • 配置目录"
-    echo -e "  • 证书与缓存"
-    echo -e "  • 定时任务"
-    echo -e "  • 快捷命令"
-    echo -e "  • 相关二进制文件"
+    echo -e "  ${G}本次已执行:${NC}"
+    [[ "$uninstall_config" == "true" ]] && echo -e "  • 配置、缓存、证书、定时任务"
+    [[ "$uninstall_binaries" == "true" ]] && echo -e "  • 快捷命令与相关二进制"
+    [[ "$uninstall_packages" == "true" ]] && echo -e "  • Xray / Sing-box 软件包"
+}
+
+uninstall_menu() {
+    echo ""
+    _line
+    echo -e "  ${W}卸载菜单${NC}"
+    _line
+    _item "1" "卸载指定协议"
+    _item "2" "仅卸载配置和缓存"
+    _item "3" "卸载配置 + 二进制"
+    _item "4" "完全卸载"
+    _item "0" "返回"
+    echo ""
+    read -rp "  请选择 [0-4]: " uninstall_choice
+    case "$uninstall_choice" in
+        1) uninstall_specific_protocol ;;
+        2)
+            uninstall_config="true"
+            uninstall_binaries="false"
+            uninstall_packages="false"
+            do_uninstall
+            ;;
+        3)
+            uninstall_config="true"
+            uninstall_binaries="true"
+            uninstall_packages="false"
+            do_uninstall
+            ;;
+        4)
+            uninstall_config="true"
+            uninstall_binaries="true"
+            uninstall_packages="true"
+            do_uninstall
+            ;;
+        0) return 0 ;;
+        *) _err "无效选择" ;;
+    esac
 }
 
 #═══════════════════════════════════════════════════════════════════════════════
@@ -24758,7 +24797,7 @@ main_menu() {
         if [[ -n "$installed" ]]; then
             echo -e "  ${C}协议与核心${NC}"
             _item "1" "安装新协议"
-            _item "2" "核心版本管理 (Xray/Sing-box)"
+            _item "2" "核心版本管理"
             _item "3" "卸载指定协议"
             echo -e "  ${D}───────────────────────────────────────────${NC}"
             echo -e "  ${C}用户与订阅${NC}"
@@ -24769,7 +24808,7 @@ main_menu() {
             echo -e "  ${D}───────────────────────────────────────────${NC}"
             echo -e "  ${C}网络与工具${NC}"
             _item "8" "分流管理"
-            _item "9" "CF Tunnel (Argo)"
+            _item "9" "CF Tunnel"
             _item "10" "BBR 网络优化"
             _item "11" "查看运行日志"
             echo -e "  ${D}───────────────────────────────────────────${NC}"
@@ -24777,7 +24816,7 @@ main_menu() {
             local script_update_item="检查脚本更新"
             [[ -n "$script_update_ver" ]] && script_update_item="检查脚本更新 ${Y}[有更新 v${script_update_ver}]${NC}"
             _item "12" "$script_update_item"
-            _item "13" "完全卸载 (含 Xray/Sing-box)"
+            _item "13" "卸载"
         else
             echo -e "  ${C}初始化${NC}"
             _item "1" "安装协议"
@@ -24807,7 +24846,7 @@ main_menu() {
                 10) enable_bbr; skip_pause=true ;;
                 11) show_logs; skip_pause=true ;;
                 12) do_update ;;
-                13) do_uninstall ;;
+                13) uninstall_menu ;;
                 0) exit 0 ;;
                 *) _err "无效选择"; skip_pause=true ;;
             esac
