@@ -18040,9 +18040,9 @@ do_install_server() {
             local uuid=$(gen_uuid) sid=$(gen_sid)
             local keys=$(xray x25519 2>/dev/null)
             [[ -z "$keys" ]] && { _err "密钥生成失败"; _pause; return 1; }
-            local privkey=$(echo "$keys" | grep "PrivateKey:" | awk '{print $2}')
-            local pubkey=$(echo "$keys" | grep "Password:" | awk '{print $2}')
-            [[ -z "$privkey" || -z "$pubkey" ]] && { _err "密钥提取失败"; _pause; return 1; }
+            local privkey=$(printf '%s\n' "$keys" | sed -n 's/^[[:space:]]*Private[[:space:]]*[Kk]ey:[[:space:]]*//p' | head -n1)
+            local pubkey=$(printf '%s\n' "$keys" | sed -n 's/^[[:space:]]*Public[[:space:]]*[Kk]ey:[[:space:]]*//p' | head -n1)
+            [[ -z "$privkey" || -z "$pubkey" ]] && { _err "密钥提取失败"; _warn "xray x25519 输出异常: $keys"; _pause; return 1; }
             
             # 使用统一的证书和 Nginx 配置函数
             setup_cert_and_nginx "vless"
@@ -18102,9 +18102,9 @@ do_install_server() {
                 local sid=$(gen_sid)
                 local keys=$(xray x25519 2>/dev/null)
                 [[ -z "$keys" ]] && { _err "密钥生成失败"; _pause; return 1; }
-                local privkey=$(echo "$keys" | grep "PrivateKey:" | awk '{print $2}')
-                local pubkey=$(echo "$keys" | grep "Password:" | awk '{print $2}')
-                [[ -z "$privkey" || -z "$pubkey" ]] && { _err "密钥提取失败"; _pause; return 1; }
+                local privkey=$(printf '%s\n' "$keys" | sed -n 's/^[[:space:]]*Private[[:space:]]*[Kk]ey:[[:space:]]*//p' | head -n1)
+                local pubkey=$(printf '%s\n' "$keys" | sed -n 's/^[[:space:]]*Public[[:space:]]*[Kk]ey:[[:space:]]*//p' | head -n1)
+                [[ -z "$privkey" || -z "$pubkey" ]] && { _err "密钥提取失败"; _warn "xray x25519 输出异常: $keys"; _pause; return 1; }
                 
                 # 使用统一的证书和 Nginx 配置函数
                 setup_cert_and_nginx "vless-xhttp"
