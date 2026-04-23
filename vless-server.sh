@@ -6679,11 +6679,12 @@ _get_latest_tag_version() {
     echo "$version"
 }
 
-# 获取脚本最新版本号（优先 release，失败则 tag，带缓存）
+# 获取脚本最新版本号（优先 release，失败则 tag，再失败则拉 raw 脚本提取版本）
 _get_latest_script_version() {
     local use_cache="${1:-true}"
     local force="${2:-false}"
     local version=""
+    local tmp_file=""
 
     _init_version_cache
     if [[ "$force" != "true" ]] && _is_cache_fresh "$SCRIPT_VERSION_CACHE_FILE"; then
@@ -6703,6 +6704,13 @@ _get_latest_script_version() {
     version=$(_get_latest_version "$SCRIPT_REPO" "false" "true" 2>/dev/null)
     if [[ -z "$version" ]]; then
         version=$(_get_latest_tag_version "$SCRIPT_REPO")
+    fi
+    if [[ -z "$version" ]]; then
+        tmp_file=$(_fetch_script_tmp 10 20 2>/dev/null) || true
+        if [[ -n "$tmp_file" && -f "$tmp_file" ]]; then
+            version=$(_extract_script_version "$tmp_file")
+            rm -f "$tmp_file" 2>/dev/null || true
+        fi
     fi
     [[ -z "$version" ]] && return 1
 
@@ -18021,7 +18029,7 @@ do_install_server() {
             local keys=$(xray x25519 2>/dev/null)
             [[ -z "$keys" ]] && { _err "密钥生成失败"; _pause; return 1; }
             local privkey=$(printf '%s\n' "$keys" | sed -n 's/^[[:space:]]*Private[[:space:]]*[Kk]ey:[[:space:]]*//p' | head -n1)
-            local pubkey=$(printf '%s\n' "$keys" | sed -n 's/^[[:space:]]*Public[[:space:]]*[Kk]ey:[[:space:]]*//p' | head -n1)
+            local pubkey=$(printf '%s\n' "$keys" | sed -n -e 's/^[[:space:]]*Public[[:space:]]*[Kk]ey:[[:space:]]*//p' -e 's/^[[:space:]]*Password[[:space:]]*(Public[[:space:]]*[Kk]ey):[[:space:]]*//p' | head -n1)
             [[ -z "$privkey" || -z "$pubkey" ]] && { _err "密钥提取失败"; _warn "xray x25519 输出异常: $keys"; _pause; return 1; }
             
             # 使用统一的证书和 Nginx 配置函数
@@ -18083,7 +18091,7 @@ do_install_server() {
                 local keys=$(xray x25519 2>/dev/null)
                 [[ -z "$keys" ]] && { _err "密钥生成失败"; _pause; return 1; }
                 local privkey=$(printf '%s\n' "$keys" | sed -n 's/^[[:space:]]*Private[[:space:]]*[Kk]ey:[[:space:]]*//p' | head -n1)
-                local pubkey=$(printf '%s\n' "$keys" | sed -n 's/^[[:space:]]*Public[[:space:]]*[Kk]ey:[[:space:]]*//p' | head -n1)
+                local pubkey=$(printf '%s\n' "$keys" | sed -n -e 's/^[[:space:]]*Public[[:space:]]*[Kk]ey:[[:space:]]*//p' -e 's/^[[:space:]]*Password[[:space:]]*(Public[[:space:]]*[Kk]ey):[[:space:]]*//p' | head -n1)
                 [[ -z "$privkey" || -z "$pubkey" ]] && { _err "密钥提取失败"; _warn "xray x25519 输出异常: $keys"; _pause; return 1; }
                 
                 # 使用统一的证书和 Nginx 配置函数
