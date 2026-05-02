@@ -10370,7 +10370,15 @@ _start_core_service() {
         _err "${process_name} 配置生成失败"
         return 1
     fi
-    
+
+    if [[ "$process_name" == "sing-box" && -f "$CFG/singbox.json" ]] && command -v sing-box >/dev/null 2>&1; then
+        if ! sing-box check -c "$CFG/singbox.json" >/tmp/vless-singbox-check.log 2>&1; then
+            _err "sing-box 配置检查失败:"
+            tail -20 /tmp/vless-singbox-check.log 2>/dev/null || true
+            return 1
+        fi
+    fi
+
     svc enable "$service_name" 2>/dev/null
     
     local svc_action="start"
@@ -10385,7 +10393,7 @@ _start_core_service() {
     local wait_count=0
     local max_wait=$([[ "$is_running" == "true" ]] && echo 5 || echo 10)
     while [[ $wait_count -lt $max_wait ]]; do
-        if _pgrep "$process_name"; then
+        if svc status "$service_name" >/dev/null 2>&1 || _pgrep "$process_name"; then
             local proto_list=$(echo $protocols | tr '\n' ' ')
             _ok "${process_name} 服务已${action_word} (协议: $proto_list)"
             return 0
@@ -10395,6 +10403,14 @@ _start_core_service() {
     done
     
     _err "${process_name} 进程未运行"
+    if [[ "$process_name" == "sing-box" ]]; then
+        _warn "sing-box 启动失败日志:"
+        if [[ "$DISTRO" == "alpine" ]]; then
+            rc-service "$service_name" status 2>&1 | tail -20 || true
+        else
+            journalctl -u "$service_name" -n 30 --no-pager 2>/dev/null || systemctl status "$service_name" --no-pager -l 2>/dev/null || true
+        fi
+    fi
     return 1
 }
 
@@ -17937,11 +17953,14 @@ select_ss_version() {
 
 do_install_server() {
     # check_installed && { _warn "已安装，请先卸载"; return; }
+    local protocol="${SELECTED_PROTOCOL:-}"
+    # 本次向导读取完预选协议后立即清掉全局状态，避免安装完成后
+    # SELECTED_PROTOCOL 残留导致再次选择“安装协议”时直接进入已安装协议处理菜单。
+    unset SELECTED_PROTOCOL INSTALL_MODE REPLACE_PORT
     _header
     echo -e "  ${W}服务端安装向导${NC}"
     echo -e "  系统: ${C}$DISTRO${NC}"
     
-    local protocol="${SELECTED_PROTOCOL:-}"
     if [[ -z "$protocol" ]]; then
         # 选择协议
         select_protocol || return 1
@@ -17960,7 +17979,9 @@ do_install_server() {
     fi
     
     # 检查该协议是否已安装
+    local protocol_was_installed_before=false
     if is_protocol_installed "$protocol"; then
+        protocol_was_installed_before=true
         # 处理已安装协议的多端口选择
         if [[ "$core" != "standalone" ]]; then
             handle_existing_protocol "$protocol" "$core" || return 1
@@ -19261,6 +19282,20 @@ do_install_server() {
         _pause
     else
         _err "安装失败"
+        # 如果本次新安装的协议已写入数据库但核心服务启动失败，回滚本次协议记录。
+        # 否则菜单会显示协议已存在，但服务实际不可用。
+        if [[ -n "$current_protocol" && "${protocol_was_installed_before:-false}" != "true" ]]; then
+            unregister_protocol "$current_protocol"
+            case "$current_protocol" in
+                hy2|tuic)
+                    generate_singbox_config >/dev/null 2>&1 || rm -f "$CFG/singbox.json"
+                    ;;
+                vless|vless-xhttp|vless-ws|vless-ws-notls|vmess-ws|vless-vision|ss2022|ss-legacy|trojan|socks)
+                    generate_xray_config >/dev/null 2>&1 || rm -f "$CFG/config.json"
+                    ;;
+            esac
+            _warn "已回滚本次失败安装的 $(get_protocol_name "$current_protocol") 配置"
+        fi
         _pause
     fi
 }
