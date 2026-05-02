@@ -4000,13 +4000,22 @@ check_installed() { [[ -d "$CFG" && ( -f "$CFG/config.json" || -f "$CFG/db.json"
 get_role()        { [[ -f "$CFG/role" ]] && cat "$CFG/role" || echo ""; }
 is_paused()       { [[ -f "$CFG/paused" ]]; }
 
+# 网络栈检测：避免纯 IPv6 机器上包管理器仍优先尝试 IPv4
+_has_ipv4_connectivity() {
+    ping -4 -c 1 -W 2 8.8.8.8 &>/dev/null && return 0
+    curl -4 -fsS --connect-timeout 3 https://1.1.1.1 >/dev/null 2>&1 && return 0
+    return 1
+}
+
 # 配置 DNS64 (纯 IPv6 环境)
 configure_dns64() {
     # 检测 IPv4 网络是否可用
-    if ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
+    if _has_ipv4_connectivity; then
+        export VLESS_IPV6_ONLY=0
         return 0  # IPv4 正常，无需配置
     fi
-    
+
+    export VLESS_IPV6_ONLY=1
     _warn "检测到纯 IPv6 环境，准备配置 DNS64..."
     
     # 备份原有配置
@@ -4022,6 +4031,60 @@ nameserver 2a00:1098:2c::1
 EOF
     
     _ok "DNS64 配置完成 (Kasper Sky + Google DNS64 + Trex)"
+}
+
+# 输出包管理器失败日志，避免只提示“jq 安装失败”而隐藏真正原因
+_show_pkg_log_tail() {
+    local log_file="$1"
+    [[ -s "$log_file" ]] || return 0
+    _warn "包管理器输出（最后 20 行）："
+    tail -n 20 "$log_file" | sed 's/^/    /' >&2
+}
+
+# 纯 IPv6 环境下让支持的包管理器强制使用 IPv6，避免 DNS64/NAT64 场景中回退 IPv4 失败
+_apt_ipv6_opts() {
+    [[ "${VLESS_IPV6_ONLY:-0}" == "1" ]] && printf '%s\n' '-o' 'Acquire::ForceIPv6=true'
+}
+
+_yum_ipv6_opts() {
+    [[ "${VLESS_IPV6_ONLY:-0}" == "1" ]] && printf '%s\n' '--setopt=ip_resolve=6'
+}
+
+# 包管理器命令重试：网络抖动、锁占用、镜像同步中都可能导致首次失败
+_pkg_retry() {
+    local desc="$1" log_file="$2"
+    shift 2
+    local attempt=1
+    local max_attempts=3
+    while (( attempt <= max_attempts )); do
+        if "$@" >>"$log_file" 2>&1; then
+            return 0
+        fi
+        if (( attempt >= max_attempts )); then
+            break
+        fi
+        _warn "$desc 失败，重试 $attempt/$max_attempts"
+        sleep $(( attempt * 2 ))
+        ((attempt++))
+    done
+    _show_pkg_log_tail "$log_file"
+    return 1
+}
+
+# apt 常见修复：dpkg 中断、依赖半安装、锁短暂占用后重试
+_apt_repair() {
+    local log_file="$1"
+    dpkg --configure -a >>"$log_file" 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get $(_apt_ipv6_opts) -f install -y >>"$log_file" 2>&1 || true
+}
+
+# RHEL/CentOS 上 jq/qrencode 常在 EPEL，先确保 EPEL 可用
+_yum_enable_epel() {
+    local log_file="$1"
+    if rpm -q epel-release >>"$log_file" 2>&1; then
+        return 0
+    fi
+    yum $(_yum_ipv6_opts) install -y epel-release >>"$log_file" 2>&1 || true
 }
 
 # 检查 CA 证书是否存在
@@ -4064,28 +4127,32 @@ check_dependencies() {
     
     if [[ "$need_install" == "true" ]]; then
         _info "安装缺失的依赖: ${missing_deps[*]}..."
+        local pkg_log="/tmp/vless-deps-install.log"
+        : > "$pkg_log"
         
         case "$DISTRO" in
             alpine)
-                apk update >/dev/null 2>&1
-                apk add --no-cache curl jq openssl coreutils ca-certificates gawk libqrencode-tools cronie >/dev/null 2>&1
+                _pkg_retry "apk update" "$pkg_log" apk update || true
+                _pkg_retry "apk add" "$pkg_log" apk add --no-cache curl jq openssl coreutils ca-certificates gawk libqrencode-tools cronie || true
                 # 启动 crond 服务
-                rc-service crond start >/dev/null 2>&1
-                rc-update add crond default >/dev/null 2>&1
+                rc-service crond start >>"$pkg_log" 2>&1 || true
+                rc-update add crond default >>"$pkg_log" 2>&1 || true
                 ;;
             centos)
-                yum install -y curl jq openssl ca-certificates qrencode cronie >/dev/null 2>&1
+                _yum_enable_epel "$pkg_log"
+                _pkg_retry "yum/dnf install" "$pkg_log" yum $(_yum_ipv6_opts) install -y curl jq openssl ca-certificates qrencode cronie || true
                 # 启动 crond 服务
-                systemctl enable crond >/dev/null 2>&1
-                systemctl start crond >/dev/null 2>&1
+                systemctl enable crond >>"$pkg_log" 2>&1 || true
+                systemctl start crond >>"$pkg_log" 2>&1 || true
                 ;;
             debian|ubuntu)
-                apt-get update >/dev/null 2>&1
-                DEBIAN_FRONTEND=noninteractive apt-get install -y curl jq openssl ca-certificates qrencode cron >/dev/null 2>&1
+                _apt_repair "$pkg_log"
+                _pkg_retry "apt-get update" "$pkg_log" env DEBIAN_FRONTEND=noninteractive apt-get $(_apt_ipv6_opts) update || true
+                _pkg_retry "apt-get install" "$pkg_log" env DEBIAN_FRONTEND=noninteractive apt-get $(_apt_ipv6_opts) install -y curl jq openssl ca-certificates qrencode cron || true
                 # Debian/Ubuntu 的 cron 通常自动启动,但确保服务运行
                 if command -v systemctl >/dev/null 2>&1; then
-                    systemctl enable cron >/dev/null 2>&1
-                    systemctl start cron >/dev/null 2>&1
+                    systemctl enable cron >>"$pkg_log" 2>&1 || true
+                    systemctl start cron >>"$pkg_log" 2>&1 || true
                 fi
                 ;;
         esac
@@ -5499,16 +5566,16 @@ install_deps() {
     _info "检查系统依赖..."
     if [[ "$DISTRO" == "alpine" ]]; then
         _info "更新软件包索引..."
-        if ! timeout 60 apk update 2>&1 | grep -E '^(fetch|OK)' | sed 's/^/  /'; then
-            if ! apk update &>/dev/null; then
-                _err "更新软件包索引失败（可能超时）"
-                return 1
-            fi
+        local pkg_log="/tmp/vless-install-deps.log"
+        : > "$pkg_log"
+        if ! _pkg_retry "apk update" "$pkg_log" apk update; then
+            _err "更新软件包索引失败（可能超时）"
+            return 1
         fi
         
         local deps="curl jq unzip iproute2 iptables ip6tables gcompat libc6-compat openssl socat bind-tools xz"
         _info "安装依赖: $deps"
-        if ! timeout 180 apk add --no-cache $deps 2>&1 | grep -E '^(\(|OK|Installing|Executing)' | sed 's/^/  /'; then
+        if ! _pkg_retry "apk add" "$pkg_log" apk add --no-cache $deps; then
             # 检查实际安装结果
             local missing=""
             for dep in $deps; do
@@ -5522,16 +5589,16 @@ install_deps() {
         _ok "依赖安装完成"
     elif [[ "$DISTRO" == "centos" ]]; then
         _info "安装 EPEL 源..."
-        if ! timeout 120 yum install -y epel-release 2>&1 | grep -E '^(Installing|Verifying|Complete)' | sed 's/^/  /'; then
-            if ! rpm -q epel-release &>/dev/null; then
-                _err "EPEL 源安装失败（可能超时）"
-                return 1
-            fi
+        local pkg_log="/tmp/vless-install-deps.log"
+        : > "$pkg_log"
+        _yum_enable_epel "$pkg_log"
+        if ! rpm -q epel-release &>/dev/null; then
+            _warn "EPEL 源未安装，继续尝试系统仓库"
         fi
         
         local deps="curl jq unzip iproute iptables vim-common openssl socat bind-utils xz"
         _info "安装依赖: $deps"
-        if ! timeout 300 yum install -y $deps 2>&1 | grep -E '^(Installing|Verifying|Complete|Downloading)' | sed 's/^/  /'; then
+        if ! _pkg_retry "yum/dnf install" "$pkg_log" yum $(_yum_ipv6_opts) install -y $deps; then
             # 检查实际安装结果
             local missing=""
             for dep in $deps; do
@@ -5545,16 +5612,17 @@ install_deps() {
         _ok "依赖安装完成"
     elif [[ "$DISTRO" == "debian" || "$DISTRO" == "ubuntu" ]]; then
         _info "更新软件包索引..."
-        # 移除 -qq 让用户能看到进度，避免交互卡住
-        if ! DEBIAN_FRONTEND=noninteractive apt-get update 2>&1 | grep -E '^(Hit|Get|Fetched|Reading)' | head -10 | sed 's/^/  /'; then
-            # 即使 grep 没匹配到也继续，只要 apt-get 成功即可
-            :
+        local pkg_log="/tmp/vless-install-deps.log"
+        : > "$pkg_log"
+        _apt_repair "$pkg_log"
+        if ! _pkg_retry "apt-get update" "$pkg_log" env DEBIAN_FRONTEND=noninteractive apt-get $(_apt_ipv6_opts) update; then
+            _err "更新软件包索引失败"
+            return 1
         fi
         
         local deps="curl jq unzip iproute2 xxd openssl socat dnsutils xz-utils iptables"
         _info "安装依赖: $deps"
-        # 使用 DEBIAN_FRONTEND 避免交互，显示简化进度，移除 timeout 避免死锁
-        if ! DEBIAN_FRONTEND=noninteractive apt-get install -y $deps 2>&1 | grep -E '^(Setting up|Unpacking|Processing|Get:|Fetched)' | sed 's/^/  /'; then
+        if ! _pkg_retry "apt-get install" "$pkg_log" env DEBIAN_FRONTEND=noninteractive apt-get $(_apt_ipv6_opts) install -y $deps; then
             # 检查实际安装结果
             if ! dpkg -l $deps >/dev/null 2>&1; then
                 _err "依赖安装失败"
