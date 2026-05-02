@@ -17,7 +17,7 @@
 #  项目地址: https://github.com/coldboy404/vless-all-in-one
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="2026.05.02.1"
+readonly VERSION="2026.05.02.2"
 readonly AUTHOR="coldboy404"
 readonly REPO_URL="https://github.com/coldboy404/vless-all-in-one"
 readonly SCRIPT_REPO="coldboy404/vless-all-in-one"
@@ -17966,12 +17966,15 @@ do_install_server() {
     
     if [[ -z "$protocol" ]]; then
         # 选择协议
-        select_protocol || return 1
+        select_protocol || { unset SELECTED_PROTOCOL INSTALL_MODE REPLACE_PORT; return 1; }
         protocol="$SELECTED_PROTOCOL"
+        # 用户在本次安装向导中选择的协议已复制到局部变量，立即清理全局选择状态。
+        # 否则安装完成回到主菜单后再次按 1，会复用上次选择并进入已安装协议处理/编辑界面。
+        unset SELECTED_PROTOCOL INSTALL_MODE REPLACE_PORT
     fi
     
     # 检查协议是否为空（用户选择返回）
-    [[ -z "$protocol" ]] && return 1
+    [[ -z "$protocol" ]] && { unset SELECTED_PROTOCOL INSTALL_MODE REPLACE_PORT; return 1; }
     
     # 确定核心类型
     local core="xray"
@@ -18355,7 +18358,6 @@ do_install_server() {
                 
                 # 切换协议为 vless-xhttp-cdn (用于后续显示配置信息)
                 protocol="vless-xhttp-cdn"
-                SELECTED_PROTOCOL="vless-xhttp-cdn"
                 
                 # 配置 Nginx 反代 XHTTP (h2c)
                 _info "配置 Nginx..."
@@ -18787,7 +18789,6 @@ do_install_server() {
                 
                 # 切换协议为 ss2022-shadowtls
                 protocol="ss2022-shadowtls"
-                SELECTED_PROTOCOL="ss2022-shadowtls"
                 
                 _info "生成配置..."
                 gen_ss2022_shadowtls_server_config "$password" "$stls_port" "$method" "$final_sni" "$stls_password" "$internal_port"
@@ -19025,7 +19026,6 @@ do_install_server() {
                 
                 # 切换协议
                 protocol="$stls_protocol"
-                SELECTED_PROTOCOL="$stls_protocol"
                 
                 _info "生成配置..."
                 gen_snell_shadowtls_server_config "$psk" "$stls_port" "$final_sni" "$stls_password" "$version" "$internal_port"
