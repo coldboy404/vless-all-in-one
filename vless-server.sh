@@ -17,7 +17,7 @@
 #  项目地址: https://github.com/coldboy404/vless-all-in-one
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="2026.05.02"
+readonly VERSION="2026.05.02.1"
 readonly AUTHOR="coldboy404"
 readonly REPO_URL="https://github.com/coldboy404/vless-all-in-one"
 readonly SCRIPT_REPO="coldboy404/vless-all-in-one"
@@ -6693,13 +6693,14 @@ _fetch_script_tmp() {
     local max_time="${2:-}"
     local tmp_file
     tmp_file=$(mktemp 2>/dev/null) || return 1
+    local url="${SCRIPT_RAW_URL}?_=$(date +%s)"
     if [[ -n "$max_time" ]]; then
-        if ! curl -sL --connect-timeout "$connect_timeout" --max-time "$max_time" -o "$tmp_file" "$SCRIPT_RAW_URL"; then
+        if ! curl -fsSL -H 'Cache-Control: no-cache' --connect-timeout "$connect_timeout" --max-time "$max_time" -o "$tmp_file" "$url"; then
             rm -f "$tmp_file"
             return 1
         fi
     else
-        if ! curl -sL --connect-timeout "$connect_timeout" -o "$tmp_file" "$SCRIPT_RAW_URL"; then
+        if ! curl -fsSL -H 'Cache-Control: no-cache' --connect-timeout "$connect_timeout" -o "$tmp_file" "$url"; then
             rm -f "$tmp_file"
             return 1
         fi
@@ -6769,16 +6770,18 @@ _get_latest_script_version() {
         fi
     fi
 
-    version=$(_get_latest_version "$SCRIPT_REPO" "false" "true" 2>/dev/null)
-    if [[ -z "$version" ]]; then
-        version=$(_get_latest_tag_version "$SCRIPT_REPO")
+    # 脚本版本以 main 分支 raw 文件中的 VERSION 为准。
+    # release/tag 可能滞后于 main，优先读 release 会导致菜单误判“已是最新版本”。
+    tmp_file=$(_fetch_script_tmp 10 20 2>/dev/null) || true
+    if [[ -n "$tmp_file" && -f "$tmp_file" ]]; then
+        version=$(_extract_script_version "$tmp_file")
+        rm -f "$tmp_file" 2>/dev/null || true
     fi
     if [[ -z "$version" ]]; then
-        tmp_file=$(_fetch_script_tmp 10 20 2>/dev/null) || true
-        if [[ -n "$tmp_file" && -f "$tmp_file" ]]; then
-            version=$(_extract_script_version "$tmp_file")
-            rm -f "$tmp_file" 2>/dev/null || true
-        fi
+        version=$(_get_latest_version "$SCRIPT_REPO" "false" "true" 2>/dev/null)
+    fi
+    if [[ -z "$version" ]]; then
+        version=$(_get_latest_tag_version "$SCRIPT_REPO")
     fi
     [[ -z "$version" ]] && return 1
 
