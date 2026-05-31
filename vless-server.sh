@@ -12250,10 +12250,13 @@ _get_existing_user_nodes() {
             while IFS='|' read -r name uuid used quota enabled port routing expire_date; do
                 [[ -z "$name" || "$enabled" != "true" ]] && continue
                 local display_name="$name"
-                # 单用户默认节点用协议显示名，不再展示内部占位名 default；
-                # SOCKS 默认节点名就是认证用户名，需要直接显示用户名。
-                if [[ "$name" == "default" && "$proto" != "socks" ]]; then
-                    display_name=$(get_protocol_name "$proto")
+                # 单用户默认节点显示优化
+                if [[ "$name" == "default" ]]; then
+                    if [[ "$proto" == "socks" ]]; then
+                         display_name=$(db_get_field "$core" "$proto" "username" 2>/dev/null || echo "$name")
+                    else
+                         display_name=$(get_protocol_name "$proto")
+                    fi
                 fi
                 printf '%s|%s|%s|%s|%s|%s\n' "$core" "$proto" "$name" "${routing:-}" "${port:-}" "$display_name"
             done <<< "$stats"
