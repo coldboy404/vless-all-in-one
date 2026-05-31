@@ -17,7 +17,7 @@
 #  项目地址: https://github.com/coldboy404/vless-all-in-one
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="2026.05.31.3"
+readonly VERSION="2026.05.31.4"
 readonly AUTHOR="coldboy404"
 readonly REPO_URL="https://github.com/coldboy404/vless-all-in-one"
 readonly SCRIPT_REPO="coldboy404/vless-all-in-one"
@@ -12300,7 +12300,7 @@ _select_routing_target_users() {
     fi
 
     printf '%s\n' "${selected[@]}" | jq -R -s '
-        split("\\n")[:-1]
+        split("\n")[:-1]
         | map(split("|"))
         | map({core: .[0], proto: .[1], name: .[2], port: .[4], display_name: .[5]})
     '
