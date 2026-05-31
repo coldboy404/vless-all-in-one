@@ -17,7 +17,7 @@
 #  项目地址: https://github.com/coldboy404/vless-all-in-one
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="2026.05.31.7"
+readonly VERSION="2026.05.31.8"
 readonly AUTHOR="coldboy404"
 readonly REPO_URL="https://github.com/coldboy404/vless-all-in-one"
 readonly SCRIPT_REPO="coldboy404/vless-all-in-one"
@@ -12267,18 +12267,69 @@ _get_existing_user_nodes() {
             while IFS='|' read -r name uuid used quota enabled port routing expire_date; do
                 [[ -z "$name" || "$enabled" != "true" ]] && continue
                 local display_name="$name"
+                local target_name="$name"
                 # 单用户默认节点显示优化
                 if [[ "$name" == "default" ]]; then
                     if [[ "$proto" == "socks" ]]; then
                          display_name=$(db_get_field "$core" "$proto" "username" 2>/dev/null || echo "$name")
+                         [[ -n "$display_name" && "$display_name" != "null" ]] && target_name="$display_name"
                     else
                          display_name=$(get_protocol_name "$proto")
                     fi
                 fi
-                printf '%s|%s|%s|%s|%s|%s\n' "$core" "$proto" "$name" "${routing:-}" "${port:-}" "$display_name"
+                printf '%s|%s|%s|%s|%s|%s\n' "$core" "$proto" "$target_name" "${routing:-}" "${port:-}" "$display_name"
             done <<< "$stats"
         done
     done | awk -F'|' '!seen[$1 FS $2 FS $3 FS $5]++'
+}
+
+# Xray SOCKS routing user 必须是认证用户名本身。
+# 兼容旧分流规则：历史 target_users 里可能保存了内部占位名 default。
+_xray_socks_routing_user() {
+    local name="$1" port="${2:-}"
+    if [[ -n "$name" && "$name" != "default" ]]; then
+        echo "$name"
+        return 0
+    fi
+
+    local config username=""
+    config=$(db_get "xray" "socks" 2>/dev/null || true)
+    if [[ -n "$config" && "$config" != "null" ]]; then
+        if echo "$config" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            if [[ -n "$port" && "$port" != "null" ]]; then
+                username=$(echo "$config" | jq -r --arg port "$port" 'map(select((.port | tostring) == $port)) | .[0].username // empty' 2>/dev/null)
+            fi
+            [[ -z "$username" || "$username" == "null" ]] && username=$(echo "$config" | jq -r '.[0].username // empty' 2>/dev/null)
+        else
+            username=$(echo "$config" | jq -r '.username // empty' 2>/dev/null)
+        fi
+    fi
+    [[ -z "$username" || "$username" == "null" ]] && username="$name"
+    echo "$username"
+}
+
+_xray_rule_users_from_targets() {
+    local target_users_json="${1:-[]}"
+    local users="[]"
+    local item core proto name port user
+    while IFS= read -r item; do
+        [[ -z "$item" ]] && continue
+        core=$(echo "$item" | jq -r '.core // ""')
+        [[ "$core" != "xray" ]] && continue
+        proto=$(echo "$item" | jq -r '.proto // ""')
+        name=$(echo "$item" | jq -r '.name // ""')
+        port=$(echo "$item" | jq -r '.port // ""')
+        [[ -z "$proto" || -z "$name" || "$name" == "null" ]] && continue
+
+        if [[ "$proto" == "socks" ]]; then
+            user=$(_xray_socks_routing_user "$name" "$port")
+        else
+            user="${name}@${proto}"
+        fi
+        [[ -n "$user" && "$user" != "null" ]] && users=$(echo "$users" | jq --arg u "$user" '. + [$u]')
+    done < <(echo "$target_users_json" | jq -c '.[]?' 2>/dev/null)
+
+    echo "$users"
 }
 
 # 选择本条分流规则应用到哪些已有节点
@@ -12533,9 +12584,9 @@ gen_xray_routing_rules() {
         local target_users_json=$(echo "$rule" | jq -c '.target_users // []')
         local rule_users="[]"
         if [[ "$target_users_json" != "[]" ]]; then
-            # Xray SOCKS 入站的 routing user 是 SOCKS 认证用户名本身，
+            # Xray SOCKS 入站的 routing user 是认证用户名本身；兼容旧规则里的 default 占位名。
             # 其他 Xray 协议使用脚本生成的 email: name@proto。
-            rule_users=$(echo "$target_users_json" | jq -c '[.[] | select(.core == "xray") | if .proto == "socks" then .name else "\(.name)@\(.proto)" end]')
+            rule_users=$(_xray_rule_users_from_targets "$target_users_json")
             [[ "$rule_users" == "[]" ]] && continue
         fi
         local ip_family_cidr=""
