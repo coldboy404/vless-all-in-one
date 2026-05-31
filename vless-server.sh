@@ -11744,8 +11744,12 @@ db_add_routing_rule() {
     
     [[ ! -f "$DB_FILE" ]] && echo '{}' > "$DB_FILE"
 
-    # 获取 IP 版本选项 (第4个参数)
+    # 获取 IP 版本选项 (第4个参数) 和节点范围 (第5个参数，JSON 数组)
     local ip_version="${4:-prefer_ipv4}"
+    local target_users_json="${5:-[]}"
+    if ! echo "$target_users_json" | jq empty >/dev/null 2>&1; then
+        target_users_json="[]"
+    fi
     
     # 生成规则 ID
     local rule_id="${rule_type}_$(date +%s)"
@@ -11772,43 +11776,43 @@ db_add_routing_rule() {
     if [[ "$rule_type" == "custom" ]]; then
         if [[ "$outbound" == "direct" ]]; then
             # 直连的 custom 规则插入到最开头
-            jq --arg id "$rule_id" --arg type "$rule_type" --arg out "$outbound" --arg domains "$rule_domains" --arg ip_ver "$ip_version" \
-                '.routing_rules = ([{id: $id, type: $type, outbound: $out, domains: $domains, ip_version: $ip_ver}] + (.routing_rules // []))' \
+            jq --arg id "$rule_id" --arg type "$rule_type" --arg out "$outbound" --arg domains "$rule_domains" --arg ip_ver "$ip_version" --argjson users "$target_users_json" \
+                '.routing_rules = ([{id: $id, type: $type, outbound: $out, domains: $domains, ip_version: $ip_ver, target_users: $users}] + (.routing_rules // []))' \
                 "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
         else
             # 非直连的 custom 规则插入到直连规则之后
-            jq --arg id "$rule_id" --arg type "$rule_type" --arg out "$outbound" --arg domains "$rule_domains" --arg ip_ver "$ip_version" \
+            jq --arg id "$rule_id" --arg type "$rule_type" --arg out "$outbound" --arg domains "$rule_domains" --arg ip_ver "$ip_version" --argjson users "$target_users_json" \
                 '.routing_rules = (
                     ((.routing_rules // []) | map(select(.outbound == "direct"))) + 
-                    [{id: $id, type: $type, outbound: $out, domains: $domains, ip_version: $ip_ver}] +
+                    [{id: $id, type: $type, outbound: $out, domains: $domains, ip_version: $ip_ver, target_users: $users}] +
                     ((.routing_rules // []) | map(select(.outbound != "direct")))
                 )' \
                 "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
         fi
     elif [[ "$rule_type" == "all" ]]; then
         # all 规则追加到末尾，优先级最低
-        jq --arg id "$rule_id" --arg type "$rule_type" --arg out "$outbound" --arg domains "$rule_domains" --arg ip_ver "$ip_version" \
+        jq --arg id "$rule_id" --arg type "$rule_type" --arg out "$outbound" --arg domains "$rule_domains" --arg ip_ver "$ip_version" --argjson users "$target_users_json" \
             '.routing_rules = (
                 ((.routing_rules // []) | map(select(.type != $type or ((.ip_version // "prefer_ipv4") != $ip_ver))))
-            ) + [{id: $id, type: $type, outbound: $out, domains: $domains, ip_version: $ip_ver}]' \
+            ) + [{id: $id, type: $type, outbound: $out, domains: $domains, ip_version: $ip_ver, target_users: $users}]' \
             "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
     else
         # 预设规则：删除同类型旧规则
         if [[ "$outbound" == "direct" ]]; then
             # 直连的预设规则插入到最开头
-            jq --arg id "$rule_id" --arg type "$rule_type" --arg out "$outbound" --arg domains "$rule_domains" --arg ip_ver "$ip_version" \
+            jq --arg id "$rule_id" --arg type "$rule_type" --arg out "$outbound" --arg domains "$rule_domains" --arg ip_ver "$ip_version" --argjson users "$target_users_json" \
                 '.routing_rules = (
-                    [{id: $id, type: $type, outbound: $out, domains: $domains, ip_version: $ip_ver}] +
+                    [{id: $id, type: $type, outbound: $out, domains: $domains, ip_version: $ip_ver, target_users: $users}] +
                     ((.routing_rules // []) | map(select(.type != $type)))
                 )' \
                 "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
         else
             # 非直连的预设规则：插入到直连和 custom 规则之后
-            jq --arg id "$rule_id" --arg type "$rule_type" --arg out "$outbound" --arg domains "$rule_domains" --arg ip_ver "$ip_version" \
+            jq --arg id "$rule_id" --arg type "$rule_type" --arg out "$outbound" --arg domains "$rule_domains" --arg ip_ver "$ip_version" --argjson users "$target_users_json" \
                 '.routing_rules = (
                     ((.routing_rules // []) | map(select(.outbound == "direct"))) + 
                     ((.routing_rules // []) | map(select(.type == "custom" and .outbound != "direct"))) + 
-                    [{id: $id, type: $type, outbound: $out, domains: $domains, ip_version: $ip_ver}] +
+                    [{id: $id, type: $type, outbound: $out, domains: $domains, ip_version: $ip_ver, target_users: $users}] +
                     ((.routing_rules // []) | map(select(.type != "custom" and .type != $type and .outbound != "direct")))
                 )' \
                 "$DB_FILE" > "$tmp" && mv "$tmp" "$DB_FILE"
@@ -12209,6 +12213,93 @@ _select_outbound() {
     return 1
 }
 
+
+# 收集当前已有用户节点（按 core|proto|name 唯一）
+# 输出: core|proto|name|routing
+_get_existing_user_nodes() {
+    [[ ! -f "$DB_FILE" ]] && return
+    local cores="xray singbox"
+    local core proto
+    for core in $cores; do
+        local protocols=""
+        if [[ "$core" == "xray" ]]; then
+            protocols=$(get_xray_protocols 2>/dev/null)
+        else
+            protocols=$(get_singbox_protocols 2>/dev/null)
+        fi
+        [[ -z "$protocols" ]] && continue
+        for proto in $protocols; do
+            local stats=$(db_get_users_stats "$core" "$proto" 2>/dev/null)
+            [[ -z "$stats" ]] && continue
+            while IFS='|' read -r name uuid used quota enabled port routing; do
+                [[ -z "$name" || "$enabled" != "true" ]] && continue
+                printf '%s|%s|%s|%s\n' "$core" "$proto" "$name" "${routing:-}"
+            done <<< "$stats"
+        done
+    done | awk -F'|' '!seen[$1 FS $2 FS $3]++'
+}
+
+# 选择本条分流规则应用到哪些已有节点
+# 返回 JSON 数组；空数组 [] 表示全部节点（兼容原全局规则行为）
+_select_routing_target_users() {
+    local nodes=()
+    local line
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && nodes+=("$line")
+    done < <(_get_existing_user_nodes)
+
+    if [[ ${#nodes[@]} -eq 0 ]]; then
+        echo "[]"
+        return 0
+    fi
+
+    echo "" >&2
+    _line >&2
+    echo -e "  ${Y}选择应用节点:${NC}" >&2
+    echo -e "  ${D}默认应用到全部节点；如只选部分节点，未选节点保持原样不受本规则影响${NC}" >&2
+    _item "a" "全部节点（默认）"
+    local idx=1
+    for line in "${nodes[@]}"; do
+        IFS='|' read -r core proto name routing <<< "$line"
+        local proto_name=$(get_protocol_name "$proto")
+        local routing_fmt=$(_format_user_routing "$routing")
+        _item "$idx" "$name ${D}(${core}/${proto_name}, 当前: $routing_fmt)${NC}"
+        ((idx++))
+    done
+    _item "0" "取消"
+    _line >&2
+    echo -e "  ${D}可输入多个序号，用逗号/空格分隔，例如: 1,3,5${NC}" >&2
+
+    local choice
+    read -rp "  选择节点 [默认全部]: " choice
+    choice=$(echo "$choice" | tr -d '\t')
+    if [[ -z "$choice" || "$choice" =~ ^[Aa]$ ]]; then
+        echo "[]"
+        return 0
+    fi
+    [[ "$choice" == "0" ]] && return 1
+
+    local selected=()
+    local token
+    choice=$(echo "$choice" | tr ',' ' ')
+    for token in $choice; do
+        if [[ "$token" =~ ^[0-9]+$ ]] && [[ "$token" -ge 1 && "$token" -le ${#nodes[@]} ]]; then
+            selected+=("${nodes[$((token-1))]}")
+        fi
+    done
+
+    if [[ ${#selected[@]} -eq 0 ]]; then
+        _warn "未选择有效节点"
+        return 1
+    fi
+
+    printf '%s\n' "${selected[@]}" | jq -R -s '
+        split("\n")[:-1]
+        | map(split("|"))
+        | map({core: .[0], proto: .[1], name: .[2]})
+    '
+}
+
 # 获取出口的显示名称
 _get_outbound_display_name() {
     local outbound="$1"
@@ -12324,6 +12415,12 @@ gen_xray_routing_rules() {
         local outbound=$(echo "$rule" | jq -r '.outbound')
         local domains=$(echo "$rule" | jq -r '.domains // ""')
         local ip_version=$(echo "$rule" | jq -r '.ip_version // "prefer_ipv4"')
+        local target_users_json=$(echo "$rule" | jq -c '.target_users // []')
+        local rule_users="[]"
+        if [[ "$target_users_json" != "[]" ]]; then
+            rule_users=$(echo "$target_users_json" | jq -c '[.[] | select(.core == "xray") | "\(.name)@\(.proto)"]')
+            [[ "$rule_users" == "[]" ]] && continue
+        fi
         local ip_family_cidr=""
         case "$ip_version" in
             ipv4_only) ip_family_cidr="0.0.0.0/0" ;;
@@ -12367,11 +12464,11 @@ gen_xray_routing_rules() {
         if [[ "$rule_type" == "all" ]]; then
             local rule_json=""
             if [[ -n "$ip_family_cidr" ]]; then
-                rule_json=$(jq -n --arg tag "$tag" --arg key "$tag_key" --arg ip "$ip_family_cidr" \
-                    '{"type":"field","network":"tcp,udp","ip":[$ip],($key):$tag}')
+                rule_json=$(jq -n --arg tag "$tag" --arg key "$tag_key" --arg ip "$ip_family_cidr" --argjson users "$rule_users" \
+                    '{"type":"field","network":"tcp,udp","ip":[$ip],($key):$tag} + (if ($users | length) > 0 then {user: $users} else {} end)')
             else
-                rule_json=$(jq -n --arg tag "$tag" --arg key "$tag_key" \
-                    '{"type":"field","network":"tcp,udp",($key):$tag}')
+                rule_json=$(jq -n --arg tag "$tag" --arg key "$tag_key" --argjson users "$rule_users" \
+                    '{"type":"field","network":"tcp,udp",($key):$tag} + (if ($users | length) > 0 then {user: $users} else {} end)')
             fi
             case "$ip_version" in
                 ipv6_only) all_ipv6=$(echo "$all_ipv6" | jq --argjson r "$rule_json" '. + [$r]') ;;
@@ -12383,18 +12480,18 @@ gen_xray_routing_rules() {
             if [[ "$domains" == geosite:* ]]; then
                 # 添加 domain 规则
                 if [[ -n "$ip_family_cidr" ]]; then
-                    result=$(echo "$result" | jq --arg geosite "$domains" --arg tag "$tag" --arg key "$tag_key" --arg ip "$ip_family_cidr" \
-                        '. + [{"type": "field", "domain": [$geosite], "ip": [$ip], ($key): $tag}]')
+                    result=$(echo "$result" | jq --arg geosite "$domains" --arg tag "$tag" --arg key "$tag_key" --arg ip "$ip_family_cidr" --argjson users "$rule_users" \
+                        '. + [({"type": "field", "domain": [$geosite], "ip": [$ip], ($key): $tag} + (if ($users | length) > 0 then {user: $users} else {} end))]')
                 else
-                    result=$(echo "$result" | jq --arg geosite "$domains" --arg tag "$tag" --arg key "$tag_key" \
-                        '. + [{"type": "field", "domain": [$geosite], ($key): $tag}]')
+                    result=$(echo "$result" | jq --arg geosite "$domains" --arg tag "$tag" --arg key "$tag_key" --argjson users "$rule_users" \
+                        '. + [({"type": "field", "domain": [$geosite], ($key): $tag} + (if ($users | length) > 0 then {user: $users} else {} end))]')
                 fi
                 
                 # 检查是否有对应的 geoip 规则需要添加（拆成独立规则，OR 关系）
                 local geoip_rule="${ROUTING_PRESETS_IP[$rule_type]:-}"
                 if [[ -n "$geoip_rule" && -z "$ip_family_cidr" ]]; then
-                    result=$(echo "$result" | jq --arg geoip "$geoip_rule" --arg tag "$tag" --arg key "$tag_key" \
-                        '. + [{"type": "field", "ip": [$geoip], ($key): $tag}]')
+                    result=$(echo "$result" | jq --arg geoip "$geoip_rule" --arg tag "$tag" --arg key "$tag_key" --argjson users "$rule_users" \
+                        '. + [({"type": "field", "ip": [$geoip], ($key): $tag} + (if ($users | length) > 0 then {user: $users} else {} end))]')
                 fi
             elif [[ "$domains" =~ ^geoip:[^,]+(,geoip:[^,]+)*$ ]]; then
                 # geoip 规则支持多个条目
@@ -12402,8 +12499,8 @@ gen_xray_routing_rules() {
                     local geoip_array
                     geoip_array=$(echo "$domains" | tr ',' '\n' | grep -v '^$' | jq -R . 2>/dev/null | jq -s . 2>/dev/null)
                     if [[ -n "$geoip_array" && "$geoip_array" != "[]" && "$geoip_array" != "null" ]] && echo "$geoip_array" | jq empty 2>/dev/null; then
-                        result=$(echo "$result" | jq --argjson ips "$geoip_array" --arg tag "$tag" --arg key "$tag_key" \
-                            '. + [{"type": "field", "ip": $ips, ($key): $tag}]')
+                        result=$(echo "$result" | jq --argjson ips "$geoip_array" --arg tag "$tag" --arg key "$tag_key" --argjson users "$rule_users" \
+                            '. + [({"type": "field", "ip": $ips, ($key): $tag} + (if ($users | length) > 0 then {user: $users} else {} end))]')
                     fi
                 fi
             else
@@ -12434,11 +12531,11 @@ gen_xray_routing_rules() {
                     domain_array=$(echo "$domain_list" | tr ',' '\n' | grep -v '^$' | sed 's/^/domain:/' | jq -R . 2>/dev/null | jq -s . 2>/dev/null)
                     if [[ -n "$domain_array" && "$domain_array" != "[]" && "$domain_array" != "null" ]] && echo "$domain_array" | jq empty 2>/dev/null; then
                         if [[ -n "$ip_family_cidr" ]]; then
-                            result=$(echo "$result" | jq --argjson domains "$domain_array" --arg tag "$tag" --arg key "$tag_key" --arg ip "$ip_family_cidr" \
-                                '. + [{"type": "field", "domain": $domains, "ip": [$ip], ($key): $tag}]')
+                            result=$(echo "$result" | jq --argjson domains "$domain_array" --arg tag "$tag" --arg key "$tag_key" --arg ip "$ip_family_cidr" --argjson users "$rule_users" \
+                                '. + [({"type": "field", "domain": $domains, "ip": [$ip], ($key): $tag} + (if ($users | length) > 0 then {user: $users} else {} end))]')
                         else
-                            result=$(echo "$result" | jq --argjson domains "$domain_array" --arg tag "$tag" --arg key "$tag_key" \
-                                '. + [{"type": "field", "domain": $domains, ($key): $tag}]')
+                            result=$(echo "$result" | jq --argjson domains "$domain_array" --arg tag "$tag" --arg key "$tag_key" --argjson users "$rule_users" \
+                                '. + [({"type": "field", "domain": $domains, ($key): $tag} + (if ($users | length) > 0 then {user: $users} else {} end))]')
                         fi
                     fi
                 fi
@@ -12448,8 +12545,8 @@ gen_xray_routing_rules() {
                     local ip_array
                     ip_array=$(echo "$ip_list" | tr ',' '\n' | grep -v '^$' | jq -R . 2>/dev/null | jq -s . 2>/dev/null)
                     if [[ -n "$ip_array" && "$ip_array" != "[]" && "$ip_array" != "null" ]] && echo "$ip_array" | jq empty 2>/dev/null; then
-                        result=$(echo "$result" | jq --argjson ips "$ip_array" --arg tag "$tag" --arg key "$tag_key" \
-                            '. + [{"type": "field", "ip": $ips, ($key): $tag}]')
+                        result=$(echo "$result" | jq --argjson ips "$ip_array" --arg tag "$tag" --arg key "$tag_key" --argjson users "$rule_users" \
+                            '. + [({"type": "field", "ip": $ips, ($key): $tag} + (if ($users | length) > 0 then {user: $users} else {} end))]')
                     fi
                 fi
             fi
@@ -12475,6 +12572,12 @@ gen_singbox_routing_rules() {
         local outbound=$(echo "$rule" | jq -r '.outbound')
         local domains=$(echo "$rule" | jq -r '.domains // ""')
         local ip_version=$(echo "$rule" | jq -r '.ip_version // "prefer_ipv4"')
+        local target_users_json=$(echo "$rule" | jq -c '.target_users // []')
+        local rule_users="[]"
+        if [[ "$target_users_json" != "[]" ]]; then
+            rule_users=$(echo "$target_users_json" | jq -c '[.[] | select(.core == "singbox") | .name]')
+            [[ "$rule_users" == "[]" ]] && continue
+        fi
         local ip_family_cidr=""
         case "$ip_version" in
             ipv4_only) ip_family_cidr="0.0.0.0/0" ;;
@@ -12513,11 +12616,11 @@ gen_singbox_routing_rules() {
         if [[ "$rule_type" == "all" ]]; then
             local rule_json=""
             if [[ -n "$ip_family_cidr" ]]; then
-                rule_json=$(jq -n --arg tag "$tag" --arg ip "$ip_family_cidr" \
-                    '{"ip_cidr":[$ip],"outbound":$tag}')
+                rule_json=$(jq -n --arg tag "$tag" --arg ip "$ip_family_cidr" --argjson users "$rule_users" \
+                    '{"ip_cidr":[$ip],"outbound":$tag} + (if ($users | length) > 0 then {auth_user: $users} else {} end)')
             else
-                rule_json=$(jq -n --arg tag "$tag" \
-                    '{"outbound":$tag}')
+                rule_json=$(jq -n --arg tag "$tag" --argjson users "$rule_users" \
+                    '{"outbound":$tag} + (if ($users | length) > 0 then {auth_user: $users} else {} end)')
             fi
             case "$ip_version" in
                 ipv6_only) all_ipv6=$(echo "$all_ipv6" | jq --argjson r "$rule_json" '. + [$r]') ;;
@@ -12530,11 +12633,11 @@ gen_singbox_routing_rules() {
                 # Sing-box 使用 rule_set 格式，需要引用 geosite 规则集
                 local geosite_name="${domains#geosite:}"
                 if [[ -n "$ip_family_cidr" ]]; then
-                    result=$(echo "$result" | jq --arg geosite "$geosite_name" --arg tag "$tag" --arg ip "$ip_family_cidr" \
-                        '. + [{"rule_set": ["geosite-\($geosite)"], "ip_cidr": [$ip], "outbound": $tag}]')
+                    result=$(echo "$result" | jq --arg geosite "$geosite_name" --arg tag "$tag" --arg ip "$ip_family_cidr" --argjson users "$rule_users" \
+                        '. + [({"rule_set": ["geosite-\($geosite)"], "ip_cidr": [$ip], "outbound": $tag} + (if ($users | length) > 0 then {auth_user: $users} else {} end))]')
                 else
-                    result=$(echo "$result" | jq --arg geosite "$geosite_name" --arg tag "$tag" \
-                        '. + [{"rule_set": ["geosite-\($geosite)"], "outbound": $tag}]')
+                    result=$(echo "$result" | jq --arg geosite "$geosite_name" --arg tag "$tag" --argjson users "$rule_users" \
+                        '. + [({"rule_set": ["geosite-\($geosite)"], "outbound": $tag} + (if ($users | length) > 0 then {auth_user: $users} else {} end))]')
                 fi
             elif [[ "$domains" =~ ^geoip:[^,]+(,geoip:[^,]+)*$ ]]; then
                 # geoip 规则转换为对应 rule_set
@@ -12542,11 +12645,11 @@ gen_singbox_routing_rules() {
                 geoip_rule_set=$(echo "$domains" | tr ',' '\n' | grep -v '^$' | sed 's/^geoip:/geoip-/' | jq -R . 2>/dev/null | jq -s . 2>/dev/null)
                 if [[ -n "$geoip_rule_set" && "$geoip_rule_set" != "[]" && "$geoip_rule_set" != "null" ]] && echo "$geoip_rule_set" | jq empty 2>/dev/null; then
                     if [[ -n "$ip_family_cidr" ]]; then
-                        result=$(echo "$result" | jq --argjson sets "$geoip_rule_set" --arg tag "$tag" --arg ip "$ip_family_cidr" \
-                            '. + [{"rule_set": $sets, "ip_cidr": [$ip], "outbound": $tag}]')
+                        result=$(echo "$result" | jq --argjson sets "$geoip_rule_set" --arg tag "$tag" --arg ip "$ip_family_cidr" --argjson users "$rule_users" \
+                            '. + [({"rule_set": $sets, "ip_cidr": [$ip], "outbound": $tag} + (if ($users | length) > 0 then {auth_user: $users} else {} end))]')
                     else
-                        result=$(echo "$result" | jq --argjson sets "$geoip_rule_set" --arg tag "$tag" \
-                            '. + [{"rule_set": $sets, "outbound": $tag}]')
+                        result=$(echo "$result" | jq --argjson sets "$geoip_rule_set" --arg tag "$tag" --argjson users "$rule_users" \
+                            '. + [({"rule_set": $sets, "outbound": $tag} + (if ($users | length) > 0 then {auth_user: $users} else {} end))]')
                     fi
                 fi
             else
@@ -12577,11 +12680,11 @@ gen_singbox_routing_rules() {
                     domain_array=$(echo "$domain_list" | tr ',' '\n' | grep -v '^$' | jq -R . 2>/dev/null | jq -s . 2>/dev/null)
                     if [[ -n "$domain_array" && "$domain_array" != "[]" && "$domain_array" != "null" ]] && echo "$domain_array" | jq empty 2>/dev/null; then
                         if [[ -n "$ip_family_cidr" ]]; then
-                            result=$(echo "$result" | jq --argjson domains "$domain_array" --arg tag "$tag" --arg ip "$ip_family_cidr" \
-                                '. + [{"domain_suffix": $domains, "ip_cidr": [$ip], "outbound": $tag}]')
+                            result=$(echo "$result" | jq --argjson domains "$domain_array" --arg tag "$tag" --arg ip "$ip_family_cidr" --argjson users "$rule_users" \
+                                '. + [({"domain_suffix": $domains, "ip_cidr": [$ip], "outbound": $tag} + (if ($users | length) > 0 then {auth_user: $users} else {} end))]')
                         else
-                            result=$(echo "$result" | jq --argjson domains "$domain_array" --arg tag "$tag" \
-                                '. + [{"domain_suffix": $domains, "outbound": $tag}]')
+                            result=$(echo "$result" | jq --argjson domains "$domain_array" --arg tag "$tag" --argjson users "$rule_users" \
+                                '. + [({"domain_suffix": $domains, "outbound": $tag} + (if ($users | length) > 0 then {auth_user: $users} else {} end))]')
                         fi
                     fi
                 fi
@@ -12591,7 +12694,7 @@ gen_singbox_routing_rules() {
                     local ip_array
                     ip_array=$(echo "$ip_list" | tr ',' '\n' | grep -v '^$' | jq -R . 2>/dev/null | jq -s . 2>/dev/null)
                     if [[ -n "$ip_array" && "$ip_array" != "[]" && "$ip_array" != "null" ]] && echo "$ip_array" | jq empty 2>/dev/null; then
-                        result=$(echo "$result" | jq --argjson ips "$ip_array" --arg tag "$tag" '. + [{"ip_cidr": $ips, "outbound": $tag}]')
+                        result=$(echo "$result" | jq --argjson ips "$ip_array" --arg tag "$tag" --argjson users "$rule_users" '. + [({"ip_cidr": $ips, "outbound": $tag} + (if ($users | length) > 0 then {auth_user: $users} else {} end))]')
                     fi
                 fi
             fi
@@ -12736,7 +12839,7 @@ show_routing_status() {
     if [[ -n "$rules" && "$rules" != "[]" ]]; then
         local rule_count=0
         # 一次性提取 type, outbound, domains, ip_version，用 | 分隔
-        while IFS='|' read -r rule_type outbound domains ip_version; do
+        while IFS='|' read -r rule_type outbound domains ip_version target_users; do
             [[ -z "$rule_type" ]] && continue
             local outbound_name=$(_get_outbound_display_name "$outbound")
             
@@ -12756,7 +12859,7 @@ show_routing_status() {
             [[ "$rule_type" == "all" ]] && rule_name="所有流量"
             [[ "$rule_type" == "ads" ]] && rule_name="广告屏蔽"
             
-            # IP 版本标记
+            # IP 版本和节点范围标记
             local ip_mark=""
             case "$ip_version" in
                 ipv4_only) ip_mark=" ${C}[仅IPv4]${NC}" ;;
@@ -12765,17 +12868,23 @@ show_routing_status() {
                 prefer_ipv6) ip_mark=" ${C}[优先IPv6]${NC}" ;;
                 as_is|asis) ip_mark=" ${C}[ALL]${NC}" ;;
             esac
+            local scope_mark=""
+            if [[ -n "$target_users" ]]; then
+                local display_users="$target_users"
+                [[ ${#display_users} -gt 24 ]] && display_users="${display_users:0:21}..."
+                scope_mark=" ${M}[节点:${display_users}]${NC}"
+            fi
             
             if [[ "$rule_type" == "all" ]]; then
-                echo -e "  ${Y}●${NC} ${rule_name} → ${C}${outbound_name}${NC}${ip_mark}"
+                echo -e "  ${Y}●${NC} ${rule_name} → ${C}${outbound_name}${NC}${ip_mark}${scope_mark}"
             elif [[ "$rule_type" == "ads" ]]; then
                 echo -e "  ${R}●${NC} ${rule_name} → ${D}拦截${NC}"
             else
-                echo -e "  ${G}●${NC} ${rule_name} → ${C}${outbound_name}${NC}${ip_mark}"
+                echo -e "  ${G}●${NC} ${rule_name} → ${C}${outbound_name}${NC}${ip_mark}${scope_mark}"
             fi
             
             ((rule_count++))
-        done < <(echo "$rules" | jq -r '.[] | "\(.type)|\(.outbound)|\(.domains // "")|\(.ip_version // "prefer_ipv4")"')
+        done < <(echo "$rules" | jq -r '.[] | "\(.type)|\(.outbound)|\(.domains // "")|\(.ip_version // "prefer_ipv4")|\((.target_users // []) | map(.name) | join(","))"')
         
         [[ $rule_count -eq 0 ]] && echo -e "  ${D}未配置分流规则${NC}"
     else
@@ -13016,6 +13125,11 @@ _add_routing_rule() {
         2) ip_version="ipv6_only" ;;
         3|"") ip_version="as_is" ;;
     esac
+
+    # 选择本规则应用到哪些已有节点；[] 表示全部节点（保持原有全局规则行为）
+    local target_users_json
+    target_users_json=$(_select_routing_target_users) || return
+    [[ -z "$target_users_json" ]] && target_users_json="[]"
     
     # 检查规则是否已存在 (custom 类型允许多条，不检查)
     if [[ "$rule_type" != "custom" ]]; then
@@ -13044,9 +13158,9 @@ _add_routing_rule() {
 
     # 保存规则
     if [[ "$rule_type" == "custom" ]]; then
-        db_add_routing_rule "$rule_type" "$outbound" "$custom_domains" "$ip_version"
+        db_add_routing_rule "$rule_type" "$outbound" "$custom_domains" "$ip_version" "$target_users_json"
     else
-        db_add_routing_rule "$rule_type" "$outbound" "" "$ip_version"
+        db_add_routing_rule "$rule_type" "$outbound" "" "$ip_version" "$target_users_json"
     fi
     
     local rule_name="${ROUTING_PRESET_NAMES[$rule_type]:-$rule_type}"
@@ -13064,7 +13178,12 @@ _add_routing_rule() {
         as_is|asis) ip_version_mark=" ${C}[ALL]${NC}" ;;
     esac
     
-    _ok "已添加规则: ${rule_name} → ${outbound_name}${ip_version_mark}"
+    local scope_text="全部节点"
+    local target_count=$(echo "$target_users_json" | jq 'length' 2>/dev/null || echo 0)
+    if [[ "$target_count" -gt 0 ]]; then
+        scope_text="${target_count} 个指定节点"
+    fi
+    _ok "已添加规则: ${rule_name} → ${outbound_name}${ip_version_mark}（${scope_text}）"
     
     # 更新配置
     _info "更新代理配置..."
@@ -13096,6 +13215,7 @@ _del_routing_rule() {
         local outbound=$(echo "$rule" | jq -r '.outbound')
         local domains=$(echo "$rule" | jq -r '.domains // ""')
         local ip_version=$(echo "$rule" | jq -r '.ip_version // "prefer_ipv4"')
+        local target_users=$(echo "$rule" | jq -r '(.target_users // []) as $u | if ($u | length) == 0 then "" else ($u | map(.name) | join(",")) end')
         local rule_name="${ROUTING_PRESET_NAMES[$rule_type]:-$rule_type}"
         
         # 自定义规则显示域名
@@ -13122,7 +13242,13 @@ _del_routing_rule() {
             esac
         fi
         
-        echo -e "  ${G}${idx})${NC} ${rule_name} → ${outbound_name}${ip_mark}"
+        local scope_mark=""
+        if [[ -n "$target_users" ]]; then
+            local display_users="$target_users"
+            [[ ${#display_users} -gt 24 ]] && display_users="${display_users:0:21}..."
+            scope_mark=" ${M}[节点:${display_users}]${NC}"
+        fi
+        echo -e "  ${G}${idx})${NC} ${rule_name} → ${outbound_name}${ip_mark}${scope_mark}"
         rule_ids+=("$rule_id")
         ((idx++))
     done < <(echo "$rules" | jq -c '.[]')
