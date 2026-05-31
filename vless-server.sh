@@ -17,7 +17,7 @@
 #  项目地址: https://github.com/coldboy404/vless-all-in-one
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="2026.05.31.6"
+readonly VERSION="2026.05.31.7"
 readonly AUTHOR="coldboy404"
 readonly REPO_URL="https://github.com/coldboy404/vless-all-in-one"
 readonly SCRIPT_REPO="coldboy404/vless-all-in-one"
@@ -659,9 +659,26 @@ gen_xray_socks_accounts() {
         return
     fi
     
+    local config=$(db_get "xray" "$proto")
+    local cfg_username="" cfg_password=""
+    if [[ -n "$config" && "$config" != "null" ]]; then
+        if echo "$config" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            cfg_username=$(echo "$config" | jq -r '.[0].username // empty')
+            cfg_password=$(echo "$config" | jq -r '.[0].password // empty')
+        else
+            cfg_username=$(echo "$config" | jq -r '.username // empty')
+            cfg_password=$(echo "$config" | jq -r '.password // empty')
+        fi
+    fi
+
     local accounts="[]"
     while IFS='|' read -r name uuid used quota enabled port routing; do
         [[ -z "$name" || -z "$uuid" || "$enabled" != "true" ]] && continue
+        # SOCKS5: routing user / auth user 必须是真实认证用户名。
+        # 兼容旧迁移数据：users[].name 可能被写成 default，但顶层 username/password 才是真实账号。
+        if [[ "$name" == "default" && -n "$cfg_username" && -n "$cfg_password" && "$uuid" == "$cfg_password" ]]; then
+            name="$cfg_username"
+        fi
         # SOCKS5: name 是 username，uuid 是 password
         accounts=$(echo "$accounts" | jq --arg u "$name" --arg p "$uuid" '. + [{user: $u, pass: $p}]')
     done <<< "$users"
