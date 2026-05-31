@@ -17,7 +17,7 @@
 #  项目地址: https://github.com/coldboy404/vless-all-in-one
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="2026.05.31.8"
+readonly VERSION="2026.05.31.9"
 readonly AUTHOR="coldboy404"
 readonly REPO_URL="https://github.com/coldboy404/vless-all-in-one"
 readonly SCRIPT_REPO="coldboy404/vless-all-in-one"
@@ -454,6 +454,7 @@ get_protocol_name() {
         tuic) echo "TUIC" ;;
         hy2) echo "Hysteria2" ;;
         ss2022) echo "SS2022" ;;
+        socks) echo "SOCKS5" ;;
         ss2022-shadowtls) echo "SS2022+ShadowTLS" ;;
         snell) echo "Snell" ;;
         snell-v5) echo "Snell v5" ;;
@@ -12268,13 +12269,13 @@ _get_existing_user_nodes() {
                 [[ -z "$name" || "$enabled" != "true" ]] && continue
                 local display_name="$name"
                 local target_name="$name"
-                # 单用户默认节点显示优化
+                # 单用户默认节点显示优化：菜单/摘要显示协议节点名，内部匹配名单独处理。
                 if [[ "$name" == "default" ]]; then
+                    display_name=$(get_protocol_name "$proto")
                     if [[ "$proto" == "socks" ]]; then
-                         display_name=$(db_get_field "$core" "$proto" "username" 2>/dev/null || echo "$name")
-                         [[ -n "$display_name" && "$display_name" != "null" ]] && target_name="$display_name"
-                    else
-                         display_name=$(get_protocol_name "$proto")
+                         local socks_username
+                         socks_username=$(db_get_field "$core" "$proto" "username" 2>/dev/null || true)
+                         [[ -n "$socks_username" && "$socks_username" != "null" ]] && target_name="$socks_username"
                     fi
                 fi
                 printf '%s|%s|%s|%s|%s|%s\n' "$core" "$proto" "$target_name" "${routing:-}" "${port:-}" "$display_name"
@@ -12423,7 +12424,9 @@ _format_routing_target_scope() {
         display_name=$(echo "$item" | jq -r '.display_name // ""')
 
         if [[ -z "$display_name" || "$display_name" == "null" ]]; then
-            if [[ "$name" == "default" && -n "$proto" && "$proto" != "socks" ]]; then
+            if [[ "$name" == "default" && -n "$proto" ]]; then
+                display_name=$(get_protocol_name "$proto")
+            elif [[ "$proto" == "socks" ]]; then
                 display_name=$(get_protocol_name "$proto")
             else
                 display_name="$name"
