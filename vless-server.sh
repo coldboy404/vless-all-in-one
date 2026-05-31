@@ -17,7 +17,7 @@
 #  项目地址: https://github.com/coldboy404/vless-all-in-one
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="2026.05.31.2"
+readonly VERSION="2026.05.31.3"
 readonly AUTHOR="coldboy404"
 readonly REPO_URL="https://github.com/coldboy404/vless-all-in-one"
 readonly SCRIPT_REPO="coldboy404/vless-all-in-one"
@@ -12306,6 +12306,55 @@ _select_routing_target_users() {
     '
 }
 
+
+# 格式化分流规则的目标节点范围
+# 参数: target_users JSON 数组；空数组表示全部节点
+_format_routing_target_scope() {
+    local target_users_json="${1:-[]}"
+    if ! echo "$target_users_json" | jq empty >/dev/null 2>&1; then
+        target_users_json="[]"
+    fi
+
+    local count
+    count=$(echo "$target_users_json" | jq 'length' 2>/dev/null || echo 0)
+    if [[ "$count" -eq 0 ]]; then
+        echo "全部节点"
+        return 0
+    fi
+
+    local labels=()
+    local item core proto name port display_name label
+    while IFS= read -r item; do
+        [[ -z "$item" ]] && continue
+        core=$(echo "$item" | jq -r '.core // ""')
+        proto=$(echo "$item" | jq -r '.proto // ""')
+        name=$(echo "$item" | jq -r '.name // ""')
+        port=$(echo "$item" | jq -r '.port // ""')
+        display_name=$(echo "$item" | jq -r '.display_name // ""')
+
+        if [[ -z "$display_name" || "$display_name" == "null" ]]; then
+            if [[ "$name" == "default" && -n "$proto" ]]; then
+                display_name=$(get_protocol_name "$proto")
+            else
+                display_name="$name"
+            fi
+        fi
+
+        label="$display_name"
+        if [[ -n "$port" && "$port" != "null" ]]; then
+            label+="($port)"
+        fi
+        [[ -n "$label" && "$label" != "null" ]] && labels+=("$label")
+    done < <(echo "$target_users_json" | jq -c '.[]')
+
+    if [[ ${#labels[@]} -eq 0 ]]; then
+        echo "全部节点"
+    else
+        local IFS=','
+        echo "${labels[*]}"
+    fi
+}
+
 # 获取出口的显示名称
 _get_outbound_display_name() {
     local outbound="$1"
@@ -12845,7 +12894,7 @@ show_routing_status() {
     if [[ -n "$rules" && "$rules" != "[]" ]]; then
         local rule_count=0
         # 一次性提取 type, outbound, domains, ip_version，用 | 分隔
-        while IFS='|' read -r rule_type outbound domains ip_version target_users; do
+        while IFS='|' read -r rule_type outbound domains ip_version target_users_json; do
             [[ -z "$rule_type" ]] && continue
             local outbound_name=$(_get_outbound_display_name "$outbound")
             
@@ -12875,9 +12924,9 @@ show_routing_status() {
                 as_is|asis) ip_mark=" ${C}[ALL]${NC}" ;;
             esac
             local scope_mark=""
-            if [[ -n "$target_users" ]]; then
-                local display_users="$target_users"
-                [[ ${#display_users} -gt 24 ]] && display_users="${display_users:0:21}..."
+            if [[ "$rule_type" != "ads" ]]; then
+                local display_users=$(_format_routing_target_scope "$target_users_json")
+                [[ ${#display_users} -gt 32 ]] && display_users="${display_users:0:29}..."
                 scope_mark=" ${M}[节点:${display_users}]${NC}"
             fi
             
@@ -12890,7 +12939,7 @@ show_routing_status() {
             fi
             
             ((rule_count++))
-        done < <(echo "$rules" | jq -r '.[] | "\(.type)|\(.outbound)|\(.domains // "")|\(.ip_version // "prefer_ipv4")|\((.target_users // []) | map(.name) | join(","))"')
+        done < <(echo "$rules" | jq -r '.[] | "\(.type)|\(.outbound)|\(.domains // "")|\(.ip_version // "prefer_ipv4")|\(.target_users // [] | @json)"')
         
         [[ $rule_count -eq 0 ]] && echo -e "  ${D}未配置分流规则${NC}"
     else
@@ -13221,7 +13270,7 @@ _del_routing_rule() {
         local outbound=$(echo "$rule" | jq -r '.outbound')
         local domains=$(echo "$rule" | jq -r '.domains // ""')
         local ip_version=$(echo "$rule" | jq -r '.ip_version // "prefer_ipv4"')
-        local target_users=$(echo "$rule" | jq -r '(.target_users // []) as $u | if ($u | length) == 0 then "" else ($u | map(.name) | join(",")) end')
+        local target_users_json=$(echo "$rule" | jq -c '.target_users // []')
         local rule_name="${ROUTING_PRESET_NAMES[$rule_type]:-$rule_type}"
         
         # 自定义规则显示域名
@@ -13249,9 +13298,9 @@ _del_routing_rule() {
         fi
         
         local scope_mark=""
-        if [[ -n "$target_users" ]]; then
-            local display_users="$target_users"
-            [[ ${#display_users} -gt 24 ]] && display_users="${display_users:0:21}..."
+        if [[ "$rule_type" != "ads" ]]; then
+            local display_users=$(_format_routing_target_scope "$target_users_json")
+            [[ ${#display_users} -gt 32 ]] && display_users="${display_users:0:29}..."
             scope_mark=" ${M}[节点:${display_users}]${NC}"
         fi
         echo -e "  ${G}${idx})${NC} ${rule_name} → ${outbound_name}${ip_mark}${scope_mark}"
