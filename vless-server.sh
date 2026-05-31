@@ -17,7 +17,7 @@
 #  项目地址: https://github.com/coldboy404/vless-all-in-one
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="2026.05.31.4"
+readonly VERSION="2026.05.31.5"
 readonly AUTHOR="coldboy404"
 readonly REPO_URL="https://github.com/coldboy404/vless-all-in-one"
 readonly SCRIPT_REPO="coldboy404/vless-all-in-one"
@@ -1428,8 +1428,12 @@ db_get_users_stats() {
             if (.users | length) > 0 then
                 .users[] | "\(.name)|\(.uuid)|\(.used // 0)|\(.quota // 0)|\(.enabled // true)|\($port_cfg.port)|\(.routing // "")|\(.expire_date // "")"
             elif (.uuid != null or .password != null or .username != null) then
-                # 无 users 数组，生成默认用户（与 Xray email 格式一致使用 "default"）
-                "default|\(.uuid // .password // .username)|0|0|true|\(.port)||"
+                # 无 users 数组，生成默认用户；SOCKS 的路由 user 是认证用户名本身
+                if $p == "socks" then
+                    "\(.username // "default")|\(.password // .uuid // "")|0|0|true|\(.port)||"
+                else
+                    "default|\(.uuid // .password // .username)|0|0|true|\(.port)||"
+                end
             else
                 empty
             end
@@ -1438,7 +1442,11 @@ db_get_users_stats() {
             if ($cfg.users | length) > 0 then
                 $cfg.users[] | "\(.name)|\(.uuid)|\(.used // 0)|\(.quota // 0)|\(.enabled // true)|\($cfg.port)|\(.routing // "")|\(.expire_date // "")"
             elif ($cfg.uuid != null or $cfg.password != null or $cfg.username != null) then
-                "default|\($cfg.uuid // $cfg.password // $cfg.username)|0|0|true|\($cfg.port)||"
+                if $p == "socks" then
+                    "\($cfg.username // "default")|\($cfg.password // $cfg.uuid // "")|0|0|true|\($cfg.port)||"
+                else
+                    "default|\($cfg.uuid // $cfg.password // $cfg.username)|0|0|true|\($cfg.port)||"
+                end
             else
                 empty
             end
@@ -3800,12 +3808,21 @@ add_xray_inbound_v2() {
             [[ -z "$socks_listen_addr" ]] && socks_listen_addr=$(_listen_addr)
             [[ -n "$config_listen_addr" ]] && socks_listen_addr="$config_listen_addr"
             
+            # Xray 的 SOCKS 入站路由 user 匹配的是认证用户名；这里必须使用完整
+            # users/accounts 列表，不能只写单端口顶层 username，否则默认节点分流会匹配不到。
+            local accounts="[]"
+            if [[ "$auth_mode" != "noauth" ]]; then
+                accounts=$(gen_xray_socks_accounts "$base_protocol")
+                if [[ -z "$accounts" || "$accounts" == "[]" ]]; then
+                    accounts=$(jq -n --arg u "$username" --arg p "$password" '[{user:$u, pass:$p}]')
+                fi
+            fi
+
             if [[ "$use_tls" == "true" ]]; then
                 # SOCKS5 + TLS
                 jq -n \
                     --argjson port "$port" \
-                    --arg username "$username" \
-                    --arg password "$password" \
+                    --argjson accounts "$accounts" \
                     --arg cert "$CFG/certs/server.crt" \
                     --arg key "$CFG/certs/server.key" \
                     --arg tag "$inbound_tag" \
@@ -3818,7 +3835,7 @@ add_xray_inbound_v2() {
                     settings: ({
                         auth: $auth_mode,
                         udp: true
-                    } + (if $auth_mode == "noauth" then {} else {accounts: [{user: $username, pass: $password}]} end)),
+                    } + (if $auth_mode == "noauth" then {} else {accounts: $accounts} end)),
                     streamSettings: {
                         network: "tcp",
                         security: "tls",
@@ -3832,8 +3849,7 @@ add_xray_inbound_v2() {
                 # SOCKS5 无 TLS
                 jq -n \
                     --argjson port "$port" \
-                    --arg username "$username" \
-                    --arg password "$password" \
+                    --argjson accounts "$accounts" \
                     --arg tag "$inbound_tag" \
                     --arg listen_addr "$socks_listen_addr" \
                     --arg auth_mode "$auth_mode" \
@@ -3844,7 +3860,7 @@ add_xray_inbound_v2() {
                     settings: ({
                         auth: $auth_mode,
                         udp: true
-                    } + (if $auth_mode == "noauth" then {} else {accounts: [{user: $username, pass: $password}]} end)),
+                    } + (if $auth_mode == "noauth" then {} else {accounts: $accounts} end)),
                     tag: $tag
                 }' > "$tmp_inbound"
             fi
@@ -12234,8 +12250,9 @@ _get_existing_user_nodes() {
             while IFS='|' read -r name uuid used quota enabled port routing expire_date; do
                 [[ -z "$name" || "$enabled" != "true" ]] && continue
                 local display_name="$name"
-                # 单用户默认节点用协议显示名，不再展示内部占位名 default
-                if [[ "$name" == "default" ]]; then
+                # 单用户默认节点用协议显示名，不再展示内部占位名 default；
+                # SOCKS 默认节点名就是认证用户名，需要直接显示用户名。
+                if [[ "$name" == "default" && "$proto" != "socks" ]]; then
                     display_name=$(get_protocol_name "$proto")
                 fi
                 printf '%s|%s|%s|%s|%s|%s\n' "$core" "$proto" "$name" "${routing:-}" "${port:-}" "$display_name"
@@ -12309,8 +12326,10 @@ _select_routing_target_users() {
 
 # 格式化分流规则的目标节点范围
 # 参数: target_users JSON 数组；空数组表示全部节点
+# 第二参数: inline(默认，逗号分隔) / lines(每个节点一行)
 _format_routing_target_scope() {
     local target_users_json="${1:-[]}"
+    local mode="${2:-inline}"
     if ! echo "$target_users_json" | jq empty >/dev/null 2>&1; then
         target_users_json="[]"
     fi
@@ -12333,7 +12352,7 @@ _format_routing_target_scope() {
         display_name=$(echo "$item" | jq -r '.display_name // ""')
 
         if [[ -z "$display_name" || "$display_name" == "null" ]]; then
-            if [[ "$name" == "default" && -n "$proto" ]]; then
+            if [[ "$name" == "default" && -n "$proto" && "$proto" != "socks" ]]; then
                 display_name=$(get_protocol_name "$proto")
             else
                 display_name="$name"
@@ -12349,10 +12368,31 @@ _format_routing_target_scope() {
 
     if [[ ${#labels[@]} -eq 0 ]]; then
         echo "全部节点"
+    elif [[ "$mode" == "lines" ]]; then
+        printf '%s\n' "${labels[@]}"
     else
         local IFS=','
         echo "${labels[*]}"
     fi
+}
+
+# 打印分流规则目标节点；节点较多时换行完整显示，避免省略号截断
+_print_routing_scope_mark() {
+    local target_users_json="${1:-[]}"
+    local prefix="${2:-    }"
+    local display_users
+    display_users=$(_format_routing_target_scope "$target_users_json" "lines")
+
+    if [[ "$display_users" == "全部节点" ]]; then
+        echo -e "${prefix}${M}[节点:全部节点]${NC}"
+        return 0
+    fi
+
+    echo -e "${prefix}${M}[节点:${NC}"
+    while IFS= read -r label; do
+        [[ -n "$label" ]] && echo -e "${prefix}  ${M}- ${label}${NC}"
+    done <<< "$display_users"
+    echo -e "${prefix}${M}]${NC}"
 }
 
 # 获取出口的显示名称
@@ -12473,7 +12513,9 @@ gen_xray_routing_rules() {
         local target_users_json=$(echo "$rule" | jq -c '.target_users // []')
         local rule_users="[]"
         if [[ "$target_users_json" != "[]" ]]; then
-            rule_users=$(echo "$target_users_json" | jq -c '[.[] | select(.core == "xray") | "\(.name)@\(.proto)"]')
+            # Xray SOCKS 入站的 routing user 是 SOCKS 认证用户名本身，
+            # 其他 Xray 协议使用脚本生成的 email: name@proto。
+            rule_users=$(echo "$target_users_json" | jq -c '[.[] | select(.core == "xray") | if .proto == "socks" then .name else "\(.name)@\(.proto)" end]')
             [[ "$rule_users" == "[]" ]] && continue
         fi
         local ip_family_cidr=""
@@ -12923,19 +12965,15 @@ show_routing_status() {
                 prefer_ipv6) ip_mark=" ${C}[优先IPv6]${NC}" ;;
                 as_is|asis) ip_mark=" ${C}[ALL]${NC}" ;;
             esac
-            local scope_mark=""
-            if [[ "$rule_type" != "ads" ]]; then
-                local display_users=$(_format_routing_target_scope "$target_users_json")
-                [[ ${#display_users} -gt 32 ]] && display_users="${display_users:0:29}..."
-                scope_mark=" ${M}[节点:${display_users}]${NC}"
-            fi
-            
             if [[ "$rule_type" == "all" ]]; then
-                echo -e "  ${Y}●${NC} ${rule_name} → ${C}${outbound_name}${NC}${ip_mark}${scope_mark}"
+                echo -e "  ${Y}●${NC} ${rule_name} → ${C}${outbound_name}${NC}${ip_mark}"
             elif [[ "$rule_type" == "ads" ]]; then
                 echo -e "  ${R}●${NC} ${rule_name} → ${D}拦截${NC}"
             else
-                echo -e "  ${G}●${NC} ${rule_name} → ${C}${outbound_name}${NC}${ip_mark}${scope_mark}"
+                echo -e "  ${G}●${NC} ${rule_name} → ${C}${outbound_name}${NC}${ip_mark}"
+            fi
+            if [[ "$rule_type" != "ads" ]]; then
+                _print_routing_scope_mark "$target_users_json" "      "
             fi
             
             ((rule_count++))
@@ -13297,13 +13335,10 @@ _del_routing_rule() {
             esac
         fi
         
-        local scope_mark=""
+        echo -e "  ${G}${idx})${NC} ${rule_name} → ${outbound_name}${ip_mark}"
         if [[ "$rule_type" != "ads" ]]; then
-            local display_users=$(_format_routing_target_scope "$target_users_json")
-            [[ ${#display_users} -gt 32 ]] && display_users="${display_users:0:29}..."
-            scope_mark=" ${M}[节点:${display_users}]${NC}"
+            _print_routing_scope_mark "$target_users_json" "      "
         fi
-        echo -e "  ${G}${idx})${NC} ${rule_name} → ${outbound_name}${ip_mark}${scope_mark}"
         rule_ids+=("$rule_id")
         ((idx++))
     done < <(echo "$rules" | jq -c '.[]')
