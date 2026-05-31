@@ -17,7 +17,7 @@
 #  项目地址: https://github.com/coldboy404/vless-all-in-one
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="2026.05.31.1"
+readonly VERSION="2026.05.31.2"
 readonly AUTHOR="coldboy404"
 readonly REPO_URL="https://github.com/coldboy404/vless-all-in-one"
 readonly SCRIPT_REPO="coldboy404/vless-all-in-one"
@@ -12214,8 +12214,8 @@ _select_outbound() {
 }
 
 
-# 收集当前已有用户节点（按 core|proto|name 唯一）
-# 输出: core|proto|name|routing
+# 收集当前已有用户节点（按 core|proto|name|port 唯一）
+# 输出: core|proto|name|routing|port|display_name
 _get_existing_user_nodes() {
     [[ ! -f "$DB_FILE" ]] && return
     local cores="xray singbox"
@@ -12231,12 +12231,17 @@ _get_existing_user_nodes() {
         for proto in $protocols; do
             local stats=$(db_get_users_stats "$core" "$proto" 2>/dev/null)
             [[ -z "$stats" ]] && continue
-            while IFS='|' read -r name uuid used quota enabled port routing; do
+            while IFS='|' read -r name uuid used quota enabled port routing expire_date; do
                 [[ -z "$name" || "$enabled" != "true" ]] && continue
-                printf '%s|%s|%s|%s\n' "$core" "$proto" "$name" "${routing:-}"
+                local display_name="$name"
+                # 单用户默认节点用协议显示名，不再展示内部占位名 default
+                if [[ "$name" == "default" ]]; then
+                    display_name=$(get_protocol_name "$proto")
+                fi
+                printf '%s|%s|%s|%s|%s|%s\n' "$core" "$proto" "$name" "${routing:-}" "${port:-}" "$display_name"
             done <<< "$stats"
         done
-    done | awk -F'|' '!seen[$1 FS $2 FS $3]++'
+    done | awk -F'|' '!seen[$1 FS $2 FS $3 FS $5]++'
 }
 
 # 选择本条分流规则应用到哪些已有节点
@@ -12260,10 +12265,11 @@ _select_routing_target_users() {
     _item "a" "全部节点（默认）"
     local idx=1
     for line in "${nodes[@]}"; do
-        IFS='|' read -r core proto name routing <<< "$line"
-        local proto_name=$(get_protocol_name "$proto")
+        IFS='|' read -r core proto name routing port display_name <<< "$line"
+        local port_text=""
+        [[ -n "$port" && "$port" != "null" ]] && port_text=" - 端口: $port"
         local routing_fmt=$(_format_user_routing "$routing")
-        _item "$idx" "$name ${D}(${core}/${proto_name}, 当前: $routing_fmt)${NC}"
+        _item "$idx" "$display_name${port_text} ${D}(当前: $routing_fmt)${NC}"
         ((idx++))
     done
     _item "0" "取消"
@@ -12294,9 +12300,9 @@ _select_routing_target_users() {
     fi
 
     printf '%s\n' "${selected[@]}" | jq -R -s '
-        split("\n")[:-1]
+        split("\\n")[:-1]
         | map(split("|"))
-        | map({core: .[0], proto: .[1], name: .[2]})
+        | map({core: .[0], proto: .[1], name: .[2], port: .[4], display_name: .[5]})
     '
 }
 
