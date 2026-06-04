@@ -17,7 +17,7 @@
 #  项目地址: https://github.com/coldboy404/vless-all-in-one
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="2026.6.1"
+readonly VERSION="2026.6.4"
 readonly AUTHOR="coldboy404"
 readonly REPO_URL="https://github.com/coldboy404/vless-all-in-one"
 readonly SCRIPT_REPO="coldboy404/vless-all-in-one"
@@ -5419,13 +5419,34 @@ _can_gen_qr() {
 
 
 
+# 获取证书 SHA-256 指纹（供 Xray 内核客户端固定自签证书使用）
+_get_cert_sha256() {
+    local cert_file="$1"
+    [[ -f "$cert_file" ]] || return 1
+    openssl x509 -noout -fingerprint -sha256 -in "$cert_file" 2>/dev/null | sed 's/.*=//;s/://g'
+}
+
 # 生成各协议分享链接
 gen_hy2_link() {
     local ip="$1" port="$2" password="$3" sni="$4" country="${5:-}"
     local ip_suffix=$(get_ip_suffix "$ip")
     local name="${country:+${country}-}Hysteria2${ip_suffix:+-${ip_suffix}}"
-    # 链接始终使用实际端口，端口跳跃需要客户端手动配置
-    printf '%s\n' "hysteria2://${password}@${ip}:${port}?sni=${sni}&insecure=1#${name}"
+    local pin_sha256=""
+    local cert_file="$CFG/certs/hy2/server.crt"
+
+    # 如 hy2 使用 ACME 证书，则固定当前实际证书；否则固定 hy2 独立自签证书。
+    if [[ -f "$CFG/cert_domain" && -f "$CFG/certs/server.crt" ]]; then
+        local cert_domain=$(cat "$CFG/cert_domain" 2>/dev/null)
+        [[ "$sni" == "$cert_domain" ]] && cert_file="$CFG/certs/server.crt"
+    fi
+    pin_sha256=$(_get_cert_sha256 "$cert_file")
+
+    # 链接始终使用实际端口，端口跳跃需要客户端手动配置。
+    # Xray 内核的 Hysteria2 不完全兼容单独 insecure=1，额外带上 allowInsecure=1
+    # 和 pinSHA256，方便客户端通过“固定证书指纹”信任自签证书。
+    local params="sni=${sni}&alpn=h3&insecure=1&allowInsecure=1"
+    [[ -n "$pin_sha256" ]] && params+="&pinSHA256=${pin_sha256}"
+    printf '%s\n' "hysteria2://${password}@${ip}:${port}?${params}#${name}"
 }
 
 gen_trojan_link() {
@@ -9524,9 +9545,13 @@ gen_hy2_server_config() {
     if [[ "$need_regen" == "true" ]]; then
         _info "为 Hysteria2 生成自签证书 (SNI: $sni)..."
         openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1) \
-            -keyout "$key_file" -out "$cert_file" -subj "/CN=$sni" -days 36500 2>/dev/null
+            -keyout "$key_file" -out "$cert_file" \
+            -subj "/CN=$sni" -days 36500 \
+            -addext "subjectAltName=DNS:$sni" 2>/dev/null
         chmod 600 "$key_file"
+        local cert_sha256=$(_get_cert_sha256 "$cert_file")
         _ok "Hysteria2 自签证书生成完成"
+        [[ -n "$cert_sha256" ]] && _info "证书指纹 SHA-256: $cert_sha256"
     fi
 
     # 写入数据库（Sing-box 从数据库读取配置生成 singbox.json）
@@ -14587,6 +14612,7 @@ parse_proxy_link() {
             local sni=$(_get_query_param "$params" "sni")
             [[ -z "$sni" ]] && sni="$host"
             local insecure=$(_get_query_param "$params" "insecure")
+            [[ -z "$insecure" ]] && insecure=$(_get_query_param "$params" "allowInsecure")
             [[ -z "$insecure" ]] && insecure="0"
             
             [[ -z "$name" ]] && name="HY2-${host##*.}"
@@ -20048,7 +20074,7 @@ parse_hy2_link() {
         local value="${param#*=}"
         case "$key" in
             sni) sni="$value" ;;
-            insecure) insecure="$value" ;;
+            insecure|allowInsecure) insecure="$value" ;;
         esac
     done
     
@@ -20201,7 +20227,7 @@ fetch_subscription() {
                             links+="ss://${ss_encoded}@${server}:${port}#$(urlencode "$name")"$'\n'
                             ;;
                         hysteria2)
-                            links+="hysteria2://${password}@${server}:${port}?sni=$sni#$(urlencode "$name")"$'\n'
+                            links+="hysteria2://${password}@${server}:${port}?sni=$sni&alpn=h3&insecure=1&allowInsecure=1#$(urlencode "$name")"$'\n'
                             ;;
                         tuic)
                             links+="tuic://${uuid}:${password}@${server}:${port}?sni=$sni#$(urlencode "$name")"$'\n'
@@ -20256,7 +20282,7 @@ fetch_subscription() {
                     links+="ss://${ss_encoded}@${server}:${port}#$(urlencode "$name")"$'\n'
                     ;;
                 hysteria2)
-                    links+="hysteria2://${password}@${server}:${port}?sni=$sni#$(urlencode "$name")"$'\n'
+                    links+="hysteria2://${password}@${server}:${port}?sni=$sni&alpn=h3&insecure=1&allowInsecure=1#$(urlencode "$name")"$'\n'
                     ;;
                 tuic)
                     links+="tuic://${uuid}:${password}@${server}:${port}?sni=$sni#$(urlencode "$name")"$'\n'
