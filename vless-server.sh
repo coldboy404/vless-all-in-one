@@ -17,7 +17,7 @@
 #  项目地址: https://github.com/coldboy404/vless-all-in-one
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="2026.6.4"
+readonly VERSION="2026.6.5"
 readonly AUTHOR="coldboy404"
 readonly REPO_URL="https://github.com/coldboy404/vless-all-in-one"
 readonly SCRIPT_REPO="coldboy404/vless-all-in-one"
@@ -5426,12 +5426,9 @@ _get_cert_sha256() {
     openssl x509 -noout -fingerprint -sha256 -in "$cert_file" 2>/dev/null | sed 's/.*=//;s/://g'
 }
 
-# 生成各协议分享链接
-gen_hy2_link() {
-    local ip="$1" port="$2" password="$3" sni="$4" country="${5:-}"
-    local ip_suffix=$(get_ip_suffix "$ip")
-    local name="${country:+${country}-}Hysteria2${ip_suffix:+-${ip_suffix}}"
-    local pin_sha256=""
+# 获取 HY2 当前实际使用证书指纹
+_get_hy2_pin_sha256() {
+    local sni="$1"
     local cert_file="$CFG/certs/hy2/server.crt"
 
     # 如 hy2 使用 ACME 证书，则固定当前实际证书；否则固定 hy2 独立自签证书。
@@ -5439,14 +5436,61 @@ gen_hy2_link() {
         local cert_domain=$(cat "$CFG/cert_domain" 2>/dev/null)
         [[ "$sni" == "$cert_domain" ]] && cert_file="$CFG/certs/server.crt"
     fi
-    pin_sha256=$(_get_cert_sha256 "$cert_file")
+    _get_cert_sha256 "$cert_file"
+}
+
+# 生成各协议分享链接
+gen_hy2_link() {
+    local ip="$1" port="$2" password="$3" sni="$4" country="${5:-}" mode="${6:-singbox}"
+    local ip_suffix=$(get_ip_suffix "$ip")
+    local name="${country:+${country}-}Hysteria2${ip_suffix:+-${ip_suffix}}"
+    local pin_sha256=""
+    local params="sni=${sni}&alpn=h3"
 
     # 链接始终使用实际端口，端口跳跃需要客户端手动配置。
-    # Xray 内核的 Hysteria2 不完全兼容单独 insecure=1，额外带上 allowInsecure=1
-    # 和 pinSHA256，方便客户端通过“固定证书指纹”信任自签证书。
-    local params="sni=${sni}&alpn=h3&insecure=1&allowInsecure=1"
-    [[ -n "$pin_sha256" ]] && params+="&pinSHA256=${pin_sha256}"
+    case "$mode" in
+        xray)
+            # Xray 内核使用 pinSHA256 固定证书时，不能再开启跳过证书验证。
+            pin_sha256=$(_get_hy2_pin_sha256 "$sni")
+            [[ -n "$pin_sha256" ]] && params+="&pinSHA256=${pin_sha256}"
+            name="${name}-Xray"
+            ;;
+        singbox|*)
+            # sing-box 内核继续使用跳过证书验证。
+            params+="&insecure=1&allowInsecure=1"
+            name="${name}-sing-box"
+            ;;
+    esac
     printf '%s\n' "hysteria2://${password}@${ip}:${port}?${params}#${name}"
+}
+
+# 保存 HY2 JOIN 信息，同时输出 sing-box 与 Xray 两种客户端链接。
+_save_hy2_join_info() {
+    local port="$1" password="$2" sni="$3"; shift 3
+    local join_file="$CFG/hy2.join"
+    : >"$join_file"
+
+    local label ip ipfmt data code singbox_link xray_link line
+    for label in V4 V6; do
+        ip=$([[ "$label" == V4 ]] && get_ipv4 || get_ipv6)
+        [[ -z "$ip" ]] && continue
+        ipfmt=$ip; [[ "$label" == V6 ]] && ipfmt="[$ip]"
+
+        data="HY2|$ipfmt|$port|$password|$sni"
+        code=$(printf '%s' "$data" | base64 -w 0 2>/dev/null || printf '%s' "$data" | base64)
+        singbox_link=$(gen_hy2_link "$ipfmt" "$port" "$password" "$sni" "" "singbox")
+        xray_link=$(gen_hy2_link "$ipfmt" "$port" "$password" "$sni" "" "xray")
+
+        printf '# IPv%s\nJOIN_%s=%s\nHY2_%s=%s\nHY2_%s_SINGBOX=%s\nHY2_%s_XRAY=%s\n' \
+            "${label#V}" "$label" "$code" \
+            "$label" "$singbox_link" \
+            "$label" "$singbox_link" \
+            "$label" "$xray_link" >>"$join_file"
+    done
+
+    for line in "$@"; do
+        printf '%s\n' "$line" >>"$join_file"
+    done
 }
 
 gen_trojan_link() {
@@ -9563,8 +9607,7 @@ gen_hy2_server_config() {
     local extra_lines=()
     [[ "$hop_enable" == "1" ]] && extra_lines=("" "# 端口跳跃已启用" "# 客户端请手动将端口改为: ${hop_start}-${hop_end}")
     
-    _save_join_info "hy2" "HY2|%s|$port|$password|$sni" \
-        "gen_hy2_link %s $port $password $sni" "${extra_lines[@]}"
+    _save_hy2_join_info "$port" "$password" "$sni" "${extra_lines[@]}"
     cp "$CFG/hy2.join" "$CFG/join.txt" 2>/dev/null
     echo "server" > "$CFG/role"
 }
@@ -17021,6 +17064,14 @@ show_single_protocol_info() {
             if [[ "$hop_enable" == "1" ]]; then
                 echo -e "  端口跳跃: ${G}${hop_start}-${hop_end}${NC}"
             fi
+            local hy2_singbox_link=$(gen_hy2_link "$config_ip" "$display_port" "$password" "$sni" "$country_code" "singbox")
+            local hy2_xray_link=$(gen_hy2_link "$config_ip" "$display_port" "$password" "$sni" "$country_code" "xray")
+            echo ""
+            echo -e "  ${Y}HY2 分享链接:${NC}"
+            echo -e "  ${D}sing-box 内核（跳过证书验证打开）:${NC}"
+            echo -e "  ${G}${hy2_singbox_link}${NC}"
+            echo -e "  ${D}Xray 内核（跳过证书验证关闭，使用固定证书指纹）:${NC}"
+            echo -e "  ${G}${hy2_xray_link}${NC}"
             echo ""
             echo -e "  ${Y}Surge 配置:${NC}"
             echo -e "  ${C}${country_code}-Hysteria2 = hysteria2, ${config_ip}, ${display_port}, password=${password}, sni=${sni}, skip-cert-verify=true${NC}"
