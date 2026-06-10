@@ -8542,6 +8542,34 @@ update_core_menu() {
     done
 }
 
+# 将 sing-box 1.12+ 废弃的 domain_strategy 迁移为 domain_resolver
+# sing-box 1.14 将移除旧字段，统一在写入配置前清理，避免遗漏直连/链式代理出口
+_migrate_singbox_domain_strategy() {
+    jq '
+        def walk(f):
+            . as $in
+            | if type == "object" then
+                reduce keys_unsorted[] as $key
+                    ({}; . + {($key): ($in[$key] | walk(f))}) | f
+              elif type == "array" then map(walk(f)) | f
+              else f
+              end;
+        def migrate_domain_strategy:
+            if type == "object" and has("domain_strategy") then
+                .domain_resolver = {server: "local", strategy: .domain_strategy}
+                | del(.domain_strategy)
+            else . end;
+        def ensure_local_resolver:
+            if any(.. | objects; has("domain_resolver")) then
+                .dns = ((.dns // {}) | .servers = (
+                    (.servers // [])
+                    | if any(.tag? == "local") then . else [{type: "local", tag: "local"}] + . end
+                ))
+            else . end;
+        walk(migrate_domain_strategy) | ensure_local_resolver
+    '
+}
+
 # 生成 Sing-box 统一配置 (Hy2 + TUIC 共用一个进程)
 generate_singbox_config() {
     local singbox_protocols=$(db_list_protocols "singbox")
@@ -9129,7 +9157,7 @@ generate_singbox_config() {
     # 合并配置并写入文件（不生成 v2ray_api，精简版 sing-box 不支持流量统计）
     echo "$base_config" | jq \
         --argjson ibs "$inbounds" \
-        '.inbounds = $ibs' > "$CFG/singbox.json"
+        '.inbounds = $ibs' | _migrate_singbox_domain_strategy > "$CFG/singbox.json"
     
     # 验证配置
     if ! jq empty "$CFG/singbox.json" 2>/dev/null; then
